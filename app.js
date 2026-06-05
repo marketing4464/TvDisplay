@@ -1,0 +1,948 @@
+const DB_NAME = "signaldeck-media";
+const DB_VERSION = 1;
+const STATE_KEY = "signaldeck-state-v1";
+
+const demoState = {
+  activeView: "overview",
+  assets: [
+    {
+      id: "asset-welcome",
+      name: "Welcome Loop",
+      type: "demo",
+      duration: 9,
+      size: 0,
+      createdAt: Date.now() - 86400000,
+      color: "blue",
+      headline: "Welcome",
+      subhead: "SignalDeck signage player is online",
+    },
+    {
+      id: "asset-events",
+      name: "Today at a Glance",
+      type: "demo",
+      duration: 8,
+      size: 0,
+      createdAt: Date.now() - 7200000,
+      color: "green",
+      headline: "Today",
+      subhead: "Photos, video, schedules, and local playback",
+    },
+  ],
+  playlists: [
+    {
+      id: "playlist-lobby",
+      name: "Lobby Rotation",
+      description: "Default photo and video loop for shared public displays.",
+      assetIds: ["asset-welcome", "asset-events"],
+      updatedAt: Date.now() - 3600000,
+    },
+  ],
+  screens: [
+    {
+      id: "screen-lobby",
+      name: "Lobby Player",
+      location: "Main Location",
+      playlistId: "playlist-lobby",
+      status: "online",
+      lastSeen: Date.now() - 14000,
+      notes: "HDMI out to Just Add Power encoder.",
+    },
+  ],
+  schedules: [
+    {
+      id: "schedule-default",
+      name: "Business Hours",
+      screenId: "screen-lobby",
+      playlistId: "playlist-lobby",
+      days: "Mon-Fri",
+      start: "08:00",
+      end: "18:00",
+    },
+  ],
+};
+
+let state = loadState();
+let activeView = state.activeView || "overview";
+let currentObjectUrls = [];
+let playerTimer = null;
+
+const app = document.querySelector("#app");
+
+function uid(prefix) {
+  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function loadState() {
+  try {
+    const saved = localStorage.getItem(STATE_KEY);
+    return saved ? JSON.parse(saved) : structuredClone(demoState);
+  } catch {
+    return structuredClone(demoState);
+  }
+}
+
+function saveState() {
+  state.activeView = activeView;
+  localStorage.setItem(STATE_KEY, JSON.stringify(state));
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return "Generated";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+}
+
+function formatTime(ts) {
+  if (!ts) return "Never";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(ts);
+}
+
+function playerUrl(screenId) {
+  const url = new URL(window.location.href);
+  url.hash = `#/player/${screenId}`;
+  return url.toString();
+}
+
+function setView(view) {
+  activeView = view;
+  saveState();
+  render();
+}
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore("blobs");
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function putBlob(id, blob) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("blobs", "readwrite");
+    tx.objectStore("blobs").put(blob, id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getBlob(id) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("blobs", "readonly");
+    const request = tx.objectStore("blobs").get(id);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function deleteBlob(id) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("blobs", "readwrite");
+    tx.objectStore("blobs").delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function clearObjectUrls() {
+  currentObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+  currentObjectUrls = [];
+}
+
+async function assetSrc(asset) {
+  if (asset.type === "demo") return null;
+  const blob = await getBlob(asset.id);
+  if (!blob) return null;
+  const url = URL.createObjectURL(blob);
+  currentObjectUrls.push(url);
+  return url;
+}
+
+function shell(title, subtitle, body, actions = "") {
+  const navItems = [
+    ["overview", "O", "Overview"],
+    ["media", "M", "Media"],
+    ["playlists", "P", "Playlists"],
+    ["screens", "S", "Screens"],
+    ["schedule", "T", "Schedule"],
+  ];
+
+  app.innerHTML = `
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">SD</div>
+          <div>
+            <h1>SignalDeck</h1>
+            <p>Custom signage MVP</p>
+          </div>
+        </div>
+        <nav class="nav">
+          ${navItems
+            .map(
+              ([view, icon, label]) => `
+                <button class="${activeView === view ? "active" : ""}" data-view="${view}">
+                  <span class="nav-icon">${icon}</span>
+                  <span>${label}</span>
+                </button>`,
+            )
+            .join("")}
+        </nav>
+        <div class="sidebar-note">
+          Player devices can open a screen URL in fullscreen kiosk mode. Media is stored locally in this browser for the MVP.
+        </div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h2>${title}</h2>
+            <p>${subtitle}</p>
+          </div>
+          <div class="actions">${actions}</div>
+        </header>
+        <section class="content">${body}</section>
+      </main>
+    </div>
+  `;
+
+  document.querySelectorAll("[data-view]").forEach((button) => {
+    button.addEventListener("click", () => setView(button.dataset.view));
+  });
+}
+
+function render() {
+  clearTimeout(playerTimer);
+  clearObjectUrls();
+
+  const playerMatch = window.location.hash.match(/^#\/player\/(.+)$/);
+  if (playerMatch) {
+    renderPlayer(playerMatch[1]);
+    return;
+  }
+
+  if (activeView === "media") renderMedia();
+  else if (activeView === "playlists") renderPlaylists();
+  else if (activeView === "screens") renderScreens();
+  else if (activeView === "schedule") renderSchedule();
+  else renderOverview();
+}
+
+function renderOverview() {
+  const activeScreens = state.screens.filter((screen) => screen.status === "online").length;
+  const assignedScreens = state.screens.filter((screen) => screen.playlistId).length;
+  const nextSchedule = state.schedules[0];
+
+  const body = `
+    <div class="metric-grid">
+      <div class="metric"><span>Media assets</span><strong>${state.assets.length}</strong></div>
+      <div class="metric"><span>Playlists</span><strong>${state.playlists.length}</strong></div>
+      <div class="metric"><span>Assigned screens</span><strong>${assignedScreens}</strong></div>
+      <div class="metric"><span>Online players</span><strong>${activeScreens}</strong></div>
+    </div>
+    <div class="grid">
+      <section class="panel span-7">
+        <div class="panel-head">
+          <div>
+            <h3>Screen Fleet</h3>
+            <p>Player health and assigned playlists</p>
+          </div>
+          <button class="btn small ghost" data-jump="screens">Manage</button>
+        </div>
+        <div class="panel-body">
+          ${screenRows(state.screens)}
+        </div>
+      </section>
+      <section class="panel span-5">
+        <div class="panel-head">
+          <div>
+            <h3>Current Schedule</h3>
+            <p>Simple daypart rules for the MVP</p>
+          </div>
+          <button class="btn small ghost" data-jump="schedule">Edit</button>
+        </div>
+        <div class="panel-body">
+          ${
+            nextSchedule
+              ? `<div class="row">
+                  <div>
+                    <p class="row-title">${nextSchedule.name}</p>
+                    <p class="row-meta">${nextSchedule.days}, ${nextSchedule.start} to ${nextSchedule.end}</p>
+                    <p class="row-meta">${screenName(nextSchedule.screenId)} plays ${playlistName(nextSchedule.playlistId)}</p>
+                  </div>
+                  <span class="status online">Active</span>
+                </div>`
+              : `<div class="empty">No schedules yet.</div>`
+          }
+        </div>
+      </section>
+      <section class="panel span-12">
+        <div class="panel-head">
+          <div>
+            <h3>Build Path</h3>
+            <p>What this MVP already proves and what comes next</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="grid">
+            <div class="span-4 row"><div><p class="row-title">1. Upload</p><p class="row-meta">Images and videos are cached in IndexedDB on this device.</p></div></div>
+            <div class="span-4 row"><div><p class="row-title">2. Assign</p><p class="row-meta">Build playlists and assign them to player screens.</p></div></div>
+            <div class="span-4 row"><div><p class="row-title">3. Play</p><p class="row-meta">Open a screen player URL on the signage computer in kiosk mode.</p></div></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
+
+  shell(
+    "Overview",
+    "A local-first proof of concept for replacing the BrightSign workflow.",
+    body,
+    `<button class="btn primary" data-jump="media">Upload media</button>`,
+  );
+  bindJumps();
+}
+
+function screenRows(screens) {
+  if (!screens.length) return `<div class="empty">No screens have been created.</div>`;
+  return `<div class="list">${screens
+    .map(
+      (screen) => `
+        <div class="row">
+          <div>
+            <p class="row-title">${screen.name}</p>
+            <p class="row-meta">${screen.location || "No location"} · ${playlistName(screen.playlistId)}</p>
+            <p class="row-meta">Last seen ${formatTime(screen.lastSeen)}</p>
+          </div>
+          <span class="status ${screen.status}">${screen.status}</span>
+        </div>`,
+    )
+    .join("")}</div>`;
+}
+
+function bindJumps() {
+  document.querySelectorAll("[data-jump]").forEach((button) => {
+    button.addEventListener("click", () => setView(button.dataset.jump));
+  });
+}
+
+async function renderMedia() {
+  const body = `
+    <div class="grid">
+      <section class="panel span-4">
+        <div class="panel-head">
+          <div>
+            <h3>Add Media</h3>
+            <p>Photos and MP4 videos for player loops</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="upload-zone">
+            <div>
+              <p class="row-title">Upload local files</p>
+              <p class="row-meta">Stored in this browser for the MVP.</p>
+              <input id="mediaUpload" type="file" accept="image/*,video/*" multiple />
+            </div>
+          </div>
+          <form id="demoAssetForm" class="form-grid" style="margin-top: 14px;">
+            <div class="field full">
+              <label for="headline">Generated slide headline</label>
+              <input id="headline" value="New Promotion" />
+            </div>
+            <div class="field full">
+              <label for="subhead">Generated slide subhead</label>
+              <input id="subhead" value="Ready to publish across every location" />
+            </div>
+            <div class="field">
+              <label for="duration">Duration</label>
+              <input id="duration" type="number" min="3" max="120" value="8" />
+            </div>
+            <div class="field">
+              <label for="color">Style</label>
+              <select id="color">
+                <option value="blue">Blue</option>
+                <option value="green">Green</option>
+                <option value="gold">Gold</option>
+              </select>
+            </div>
+            <div class="field full">
+              <button class="btn primary" type="submit">Create generated slide</button>
+            </div>
+          </form>
+        </div>
+      </section>
+      <section class="panel span-8">
+        <div class="panel-head">
+          <div>
+            <h3>Media Library</h3>
+            <p>${state.assets.length} asset${state.assets.length === 1 ? "" : "s"} available</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div id="assetGrid" class="asset-grid"></div>
+        </div>
+      </section>
+    </div>
+  `;
+
+  shell("Media", "Upload and cache photos or videos for signage playback.", body);
+  await hydrateAssetGrid();
+
+  document.querySelector("#mediaUpload").addEventListener("change", handleUpload);
+  document.querySelector("#demoAssetForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const asset = {
+      id: uid("asset"),
+      name: document.querySelector("#headline").value.trim() || "Generated Slide",
+      type: "demo",
+      duration: Number(document.querySelector("#duration").value || 8),
+      size: 0,
+      createdAt: Date.now(),
+      color: document.querySelector("#color").value,
+      headline: document.querySelector("#headline").value.trim() || "Generated Slide",
+      subhead: document.querySelector("#subhead").value.trim() || "Ready for playback",
+    };
+    state.assets.unshift(asset);
+    saveState();
+    renderMedia();
+  });
+}
+
+async function hydrateAssetGrid() {
+  const grid = document.querySelector("#assetGrid");
+  if (!state.assets.length) {
+    grid.innerHTML = `<div class="empty">Upload media or create a generated slide to begin.</div>`;
+    return;
+  }
+
+  const cards = await Promise.all(
+    state.assets.map(async (asset) => {
+      const src = await assetSrc(asset);
+      let thumb = `<div class="thumb demo">${asset.headline || "Slide"}</div>`;
+      if (src && asset.type.startsWith("image/")) {
+        thumb = `<div class="thumb"><img src="${src}" alt="${asset.name}" /></div>`;
+      } else if (src && asset.type.startsWith("video/")) {
+        thumb = `<div class="thumb"><video src="${src}" muted></video></div>`;
+      }
+      return `
+        <article class="asset-card">
+          ${thumb}
+          <div class="body">
+            <p class="row-title">${asset.name}</p>
+            <p class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type} · ${formatBytes(asset.size)}</p>
+            <div class="pill-row">
+              <span class="pill">${asset.duration || 10}s</span>
+              <span class="pill">${formatTime(asset.createdAt)}</span>
+            </div>
+            <div class="pill-row">
+              <button class="btn small danger" data-delete-asset="${asset.id}">Delete</button>
+            </div>
+          </div>
+        </article>`;
+    }),
+  );
+  grid.innerHTML = cards.join("");
+  document.querySelectorAll("[data-delete-asset]").forEach((button) => {
+    button.addEventListener("click", () => removeAsset(button.dataset.deleteAsset));
+  });
+}
+
+async function handleUpload(event) {
+  const files = [...event.target.files];
+  for (const file of files) {
+    const id = uid("asset");
+    await putBlob(id, file);
+    state.assets.unshift({
+      id,
+      name: file.name.replace(/\.[^.]+$/, ""),
+      type: file.type || "application/octet-stream",
+      duration: file.type.startsWith("video/") ? 30 : 10,
+      size: file.size,
+      createdAt: Date.now(),
+    });
+  }
+  saveState();
+  renderMedia();
+}
+
+async function removeAsset(assetId) {
+  state.assets = state.assets.filter((asset) => asset.id !== assetId);
+  state.playlists = state.playlists.map((playlist) => ({
+    ...playlist,
+    assetIds: playlist.assetIds.filter((id) => id !== assetId),
+  }));
+  await deleteBlob(assetId);
+  saveState();
+  render();
+}
+
+function renderPlaylists() {
+  const selected = state.playlists[0];
+  const body = `
+    <div class="grid">
+      <section class="panel span-5">
+        <div class="panel-head">
+          <div>
+            <h3>Create Playlist</h3>
+            <p>Choose the media that should loop together</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <form id="playlistForm" class="form-grid">
+            <div class="field full">
+              <label for="playlistName">Playlist name</label>
+              <input id="playlistName" placeholder="Menu Board Morning Loop" required />
+            </div>
+            <div class="field full">
+              <label for="playlistDescription">Description</label>
+              <textarea id="playlistDescription" placeholder="Where this playlist should be used"></textarea>
+            </div>
+            <div class="field full">
+              <label>Assets</label>
+              <div class="check-list">
+                ${state.assets
+                  .map(
+                    (asset) => `
+                      <label class="check-item">
+                        <input type="checkbox" name="assetIds" value="${asset.id}" />
+                        <span>${asset.name}<br><small class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type}</small></span>
+                        <span class="pill">${asset.duration || 10}s</span>
+                      </label>`,
+                  )
+                  .join("")}
+              </div>
+            </div>
+            <div class="field full">
+              <button class="btn primary" type="submit">Create playlist</button>
+            </div>
+          </form>
+        </div>
+      </section>
+      <section class="panel span-7">
+        <div class="panel-head">
+          <div>
+            <h3>Playlists</h3>
+            <p>${state.playlists.length} playlist${state.playlists.length === 1 ? "" : "s"} configured</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          ${playlistRows()}
+        </div>
+      </section>
+      <section class="panel span-12">
+        <div class="panel-head">
+          <div>
+            <h3>Playlist Preview</h3>
+            <p>${selected ? selected.name : "No playlist selected"}</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          ${selected ? playlistPreview(selected) : `<div class="empty">Create a playlist to preview it.</div>`}
+        </div>
+      </section>
+    </div>
+  `;
+
+  shell("Playlists", "Assemble media into loops that can be assigned to screens.", body);
+  document.querySelector("#playlistForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const assetIds = form.getAll("assetIds");
+    const playlist = {
+      id: uid("playlist"),
+      name: document.querySelector("#playlistName").value.trim(),
+      description: document.querySelector("#playlistDescription").value.trim(),
+      assetIds,
+      updatedAt: Date.now(),
+    };
+    state.playlists.unshift(playlist);
+    saveState();
+    renderPlaylists();
+  });
+  bindPlaylistDelete();
+}
+
+function playlistRows() {
+  if (!state.playlists.length) return `<div class="empty">No playlists yet.</div>`;
+  return `<div class="list">${state.playlists
+    .map(
+      (playlist) => `
+        <div class="row">
+          <div>
+            <p class="row-title">${playlist.name}</p>
+            <p class="row-meta">${playlist.description || "No description"} · ${playlist.assetIds.length} item${playlist.assetIds.length === 1 ? "" : "s"}</p>
+            <p class="row-meta">Updated ${formatTime(playlist.updatedAt)}</p>
+          </div>
+          <button class="btn small danger" data-delete-playlist="${playlist.id}">Delete</button>
+        </div>`,
+    )
+    .join("")}</div>`;
+}
+
+function playlistPreview(playlist) {
+  const assets = playlist.assetIds.map((id) => findAsset(id)).filter(Boolean);
+  if (!assets.length) return `<div class="empty">This playlist has no assets.</div>`;
+  return `<div class="list">${assets
+    .map(
+      (asset, index) => `
+        <div class="row">
+          <div>
+            <p class="row-title">${index + 1}. ${asset.name}</p>
+            <p class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type} · ${asset.duration || 10} seconds</p>
+          </div>
+          <span class="pill">${formatBytes(asset.size)}</span>
+        </div>`,
+    )
+    .join("")}</div>`;
+}
+
+function bindPlaylistDelete() {
+  document.querySelectorAll("[data-delete-playlist]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.deletePlaylist;
+      state.playlists = state.playlists.filter((playlist) => playlist.id !== id);
+      state.screens = state.screens.map((screen) =>
+        screen.playlistId === id ? { ...screen, playlistId: "" } : screen,
+      );
+      state.schedules = state.schedules.filter((schedule) => schedule.playlistId !== id);
+      saveState();
+      renderPlaylists();
+    });
+  });
+}
+
+function renderScreens() {
+  const body = `
+    <div class="grid">
+      <section class="panel span-4">
+        <div class="panel-head">
+          <div>
+            <h3>Add Screen</h3>
+            <p>A screen is one player output/feed</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <form id="screenForm" class="form-grid">
+            <div class="field full">
+              <label for="screenName">Screen name</label>
+              <input id="screenName" placeholder="Bar Left Feed" required />
+            </div>
+            <div class="field full">
+              <label for="screenLocation">Location</label>
+              <input id="screenLocation" placeholder="Downtown showroom" />
+            </div>
+            <div class="field full">
+              <label for="screenPlaylist">Playlist</label>
+              <select id="screenPlaylist">
+                <option value="">Unassigned</option>
+                ${state.playlists.map((playlist) => `<option value="${playlist.id}">${playlist.name}</option>`).join("")}
+              </select>
+            </div>
+            <div class="field full">
+              <label for="screenNotes">Notes</label>
+              <textarea id="screenNotes" placeholder="Example: HDMI to J+P encoder input 3"></textarea>
+            </div>
+            <div class="field full">
+              <button class="btn primary" type="submit">Create screen</button>
+            </div>
+          </form>
+        </div>
+      </section>
+      <section class="panel span-8">
+        <div class="panel-head">
+          <div>
+            <h3>Screens</h3>
+            <p>Open a player link on the matching mini PC</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          ${screenManagerRows()}
+        </div>
+      </section>
+    </div>
+  `;
+
+  shell("Screens", "Manage player endpoints and copy fullscreen player URLs.", body);
+  document.querySelector("#screenForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    state.screens.unshift({
+      id: uid("screen"),
+      name: document.querySelector("#screenName").value.trim(),
+      location: document.querySelector("#screenLocation").value.trim(),
+      playlistId: document.querySelector("#screenPlaylist").value,
+      status: "offline",
+      lastSeen: null,
+      notes: document.querySelector("#screenNotes").value.trim(),
+    });
+    saveState();
+    renderScreens();
+  });
+  bindScreenActions();
+}
+
+function screenManagerRows() {
+  if (!state.screens.length) return `<div class="empty">No screens yet.</div>`;
+  return `<div class="list">${state.screens
+    .map(
+      (screen) => `
+        <div class="row">
+          <div>
+            <p class="row-title">${screen.name}</p>
+            <p class="row-meta">${screen.location || "No location"} · ${playlistName(screen.playlistId)}</p>
+            <p class="row-meta">${screen.notes || "No notes"}</p>
+            <a class="preview-link" href="${playerUrl(screen.id)}">${playerUrl(screen.id)}</a>
+          </div>
+          <div class="actions">
+            <a class="btn small ghost" href="${playerUrl(screen.id)}">Open player</a>
+            <button class="btn small ghost" data-copy="${screen.id}">Copy URL</button>
+            <button class="btn small danger" data-delete-screen="${screen.id}">Delete</button>
+          </div>
+        </div>`,
+    )
+    .join("")}</div>`;
+}
+
+function bindScreenActions() {
+  document.querySelectorAll("[data-copy]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await navigator.clipboard.writeText(playerUrl(button.dataset.copy));
+      button.textContent = "Copied";
+      setTimeout(() => (button.textContent = "Copy URL"), 1100);
+    });
+  });
+  document.querySelectorAll("[data-delete-screen]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.deleteScreen;
+      state.screens = state.screens.filter((screen) => screen.id !== id);
+      state.schedules = state.schedules.filter((schedule) => schedule.screenId !== id);
+      saveState();
+      renderScreens();
+    });
+  });
+}
+
+function renderSchedule() {
+  const body = `
+    <div class="grid">
+      <section class="panel span-5">
+        <div class="panel-head">
+          <div>
+            <h3>Add Schedule</h3>
+            <p>Basic time windows for a screen</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <form id="scheduleForm" class="form-grid">
+            <div class="field full">
+              <label for="scheduleName">Schedule name</label>
+              <input id="scheduleName" placeholder="Evening Promo" required />
+            </div>
+            <div class="field">
+              <label for="scheduleScreen">Screen</label>
+              <select id="scheduleScreen" required>
+                ${state.screens.map((screen) => `<option value="${screen.id}">${screen.name}</option>`).join("")}
+              </select>
+            </div>
+            <div class="field">
+              <label for="schedulePlaylist">Playlist</label>
+              <select id="schedulePlaylist" required>
+                ${state.playlists.map((playlist) => `<option value="${playlist.id}">${playlist.name}</option>`).join("")}
+              </select>
+            </div>
+            <div class="field">
+              <label for="scheduleDays">Days</label>
+              <input id="scheduleDays" value="Mon-Fri" />
+            </div>
+            <div class="field">
+              <label for="scheduleStart">Start</label>
+              <input id="scheduleStart" type="time" value="08:00" />
+            </div>
+            <div class="field">
+              <label for="scheduleEnd">End</label>
+              <input id="scheduleEnd" type="time" value="18:00" />
+            </div>
+            <div class="field full">
+              <button class="btn primary" type="submit" ${!state.screens.length || !state.playlists.length ? "disabled" : ""}>Create schedule</button>
+            </div>
+          </form>
+        </div>
+      </section>
+      <section class="panel span-7">
+        <div class="panel-head">
+          <div>
+            <h3>Schedule Rules</h3>
+            <p>The player currently uses assigned playlist first, then schedule rules</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          ${scheduleRows()}
+        </div>
+      </section>
+    </div>
+  `;
+
+  shell("Schedule", "Create simple daypart rules for content playback.", body);
+  const form = document.querySelector("#scheduleForm");
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    state.schedules.unshift({
+      id: uid("schedule"),
+      name: document.querySelector("#scheduleName").value.trim(),
+      screenId: document.querySelector("#scheduleScreen").value,
+      playlistId: document.querySelector("#schedulePlaylist").value,
+      days: document.querySelector("#scheduleDays").value.trim(),
+      start: document.querySelector("#scheduleStart").value,
+      end: document.querySelector("#scheduleEnd").value,
+    });
+    saveState();
+    renderSchedule();
+  });
+  document.querySelectorAll("[data-delete-schedule]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.schedules = state.schedules.filter((schedule) => schedule.id !== button.dataset.deleteSchedule);
+      saveState();
+      renderSchedule();
+    });
+  });
+}
+
+function scheduleRows() {
+  if (!state.schedules.length) return `<div class="empty">No schedule rules yet.</div>`;
+  return `<div class="list">${state.schedules
+    .map(
+      (schedule) => `
+        <div class="row">
+          <div>
+            <p class="row-title">${schedule.name}</p>
+            <p class="row-meta">${screenName(schedule.screenId)} · ${playlistName(schedule.playlistId)}</p>
+            <p class="row-meta">${schedule.days}, ${schedule.start} to ${schedule.end}</p>
+          </div>
+          <button class="btn small danger" data-delete-schedule="${schedule.id}">Delete</button>
+        </div>`,
+    )
+    .join("")}</div>`;
+}
+
+async function renderPlayer(screenId) {
+  clearObjectUrls();
+  const screen = state.screens.find((item) => item.id === screenId);
+  if (!screen) {
+    app.innerHTML = `<div class="player-error"><div><h1>Screen not found</h1><p>Check the player URL in the dashboard.</p></div></div>`;
+    return;
+  }
+
+  screen.status = "online";
+  screen.lastSeen = Date.now();
+  saveState();
+
+  const playlist = activePlaylistForScreen(screen);
+  const assets = playlist ? playlist.assetIds.map((id) => findAsset(id)).filter(Boolean) : [];
+
+  if (!playlist || !assets.length) {
+    app.innerHTML = `<div class="player-error"><div><h1>${screen.name}</h1><p>No playable playlist is assigned.</p></div></div>`;
+    return;
+  }
+
+  app.innerHTML = `
+    <section class="player">
+      <div id="playerStage" class="player-stage"></div>
+      <div class="player-osd">
+        <span>${screen.name} · ${playlist.name}</span>
+        <span id="playerClock"></span>
+      </div>
+    </section>
+  `;
+
+  const clock = document.querySelector("#playerClock");
+  setInterval(() => {
+    clock.textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }, 1000);
+
+  let index = 0;
+  const playNext = async () => {
+    const asset = assets[index % assets.length];
+    index += 1;
+    await showAsset(asset, playNext);
+  };
+  playNext();
+}
+
+async function showAsset(asset, done) {
+  const stage = document.querySelector("#playerStage");
+  if (!stage) return;
+
+  if (asset.type === "demo") {
+    stage.innerHTML = `
+      <div class="demo-slide">
+        <div>
+          <h1>${asset.headline || asset.name}</h1>
+          <p>${asset.subhead || "Generated signage slide"}</p>
+        </div>
+      </div>`;
+    playerTimer = setTimeout(done, (asset.duration || 8) * 1000);
+    return;
+  }
+
+  const src = await assetSrc(asset);
+  if (!src) {
+    stage.innerHTML = `<div class="demo-slide"><div><h1>Missing Media</h1><p>${asset.name}</p></div></div>`;
+    playerTimer = setTimeout(done, 5000);
+    return;
+  }
+
+  if (asset.type.startsWith("video/")) {
+    stage.innerHTML = `<video src="${src}" autoplay muted playsinline></video>`;
+    const video = stage.querySelector("video");
+    video.onended = done;
+    video.onerror = () => {
+      playerTimer = setTimeout(done, 5000);
+    };
+    playerTimer = setTimeout(done, Math.max(10, asset.duration || 30) * 1000);
+  } else {
+    stage.innerHTML = `<img src="${src}" alt="${asset.name}" />`;
+    playerTimer = setTimeout(done, (asset.duration || 10) * 1000);
+  }
+}
+
+function activePlaylistForScreen(screen) {
+  const scheduled = state.schedules.find((schedule) => schedule.screenId === screen.id && scheduleMatches(schedule));
+  if (scheduled) return state.playlists.find((playlist) => playlist.id === scheduled.playlistId);
+  return state.playlists.find((playlist) => playlist.id === screen.playlistId);
+}
+
+function scheduleMatches(schedule) {
+  const now = new Date();
+  const current = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  return current >= schedule.start && current <= schedule.end;
+}
+
+function findAsset(id) {
+  return state.assets.find((asset) => asset.id === id);
+}
+
+function playlistName(id) {
+  return state.playlists.find((playlist) => playlist.id === id)?.name || "No playlist assigned";
+}
+
+function screenName(id) {
+  return state.screens.find((screen) => screen.id === id)?.name || "Unknown screen";
+}
+
+window.addEventListener("hashchange", render);
+render();
