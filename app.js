@@ -90,15 +90,35 @@ function saveState() {
 function normalizeState(nextState) {
   return {
     ...nextState,
-    assets: (nextState.assets || []).map((asset) => ({
-      ...asset,
-      duration: SLIDE_DURATION_SECONDS,
-    })),
+    assets: (nextState.assets || []).map((asset) => {
+      if (isVideoAsset(asset)) {
+        return {
+          ...asset,
+          durationMode: "full-video",
+        };
+      }
+      return {
+        ...asset,
+        durationMode: "fixed",
+        duration: SLIDE_DURATION_SECONDS,
+      };
+    }),
   };
+}
+
+function isVideoAsset(asset) {
+  return asset.type?.startsWith("video/");
 }
 
 function assetDuration(asset) {
   return asset.duration || SLIDE_DURATION_SECONDS;
+}
+
+function assetDurationLabel(asset) {
+  if (isVideoAsset(asset)) {
+    return "Full video";
+  }
+  return formatDuration(assetDuration(asset));
 }
 
 function formatDuration(seconds) {
@@ -115,6 +135,28 @@ async function requestPersistentStorage() {
   } catch {
     return false;
   }
+}
+
+function readVideoDuration(file) {
+  return new Promise((resolve) => {
+    if (!file.type.startsWith("video/")) {
+      resolve(null);
+      return;
+    }
+
+    const video = document.createElement("video");
+    const url = URL.createObjectURL(file);
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(url);
+      resolve(Number.isFinite(video.duration) ? Math.ceil(video.duration) : null);
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(null);
+    };
+    video.src = url;
+  });
 }
 
 function formatBytes(bytes) {
@@ -380,7 +422,7 @@ async function renderMedia() {
         <div class="panel-head">
           <div>
             <h3>Add Media</h3>
-            <p>Photos and MP4 videos for 2-minute player loops</p>
+            <p>Photos play for 2 minutes; videos play full length</p>
           </div>
         </div>
         <div class="panel-body">
@@ -401,7 +443,7 @@ async function renderMedia() {
               <input id="subhead" value="Ready to publish across every location" />
             </div>
             <div class="field">
-              <label>Duration</label>
+              <label>Generated slide duration</label>
               <input value="${formatDuration(SLIDE_DURATION_SECONDS)}" disabled />
             </div>
             <div class="field">
@@ -478,7 +520,7 @@ async function hydrateAssetGrid() {
             <p class="row-title">${asset.name}</p>
             <p class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type} · ${formatBytes(asset.size)}</p>
             <div class="pill-row">
-              <span class="pill">${formatDuration(assetDuration(asset))}</span>
+              <span class="pill">${assetDurationLabel(asset)}</span>
               <span class="pill">${formatTime(asset.createdAt)}</span>
             </div>
             <div class="pill-row">
@@ -499,12 +541,15 @@ async function handleUpload(event) {
   const files = [...event.target.files];
   for (const file of files) {
     const id = uid("asset");
+    const isVideo = file.type.startsWith("video/");
+    const videoDuration = await readVideoDuration(file);
     await putBlob(id, file);
     state.assets.unshift({
       id,
       name: file.name.replace(/\.[^.]+$/, ""),
       type: file.type || "application/octet-stream",
-      duration: SLIDE_DURATION_SECONDS,
+      durationMode: isVideo ? "full-video" : "fixed",
+      duration: isVideo ? videoDuration : SLIDE_DURATION_SECONDS,
       size: file.size,
       createdAt: Date.now(),
     });
@@ -554,7 +599,7 @@ function renderPlaylists() {
                       <label class="check-item">
                         <input type="checkbox" name="assetIds" value="${asset.id}" />
                         <span>${asset.name}<br><small class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type}</small></span>
-                        <span class="pill">${formatDuration(assetDuration(asset))}</span>
+                        <span class="pill">${assetDurationLabel(asset)}</span>
                       </label>`,
                   )
                   .join("")}
@@ -636,7 +681,7 @@ function playlistPreview(playlist) {
         <div class="row">
           <div>
             <p class="row-title">${index + 1}. ${asset.name}</p>
-            <p class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type} · ${formatDuration(assetDuration(asset))}</p>
+            <p class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type} · ${assetDurationLabel(asset)}</p>
           </div>
           <span class="pill">${formatBytes(asset.size)}</span>
         </div>`,
@@ -939,12 +984,12 @@ async function showAsset(asset, done) {
   }
 
   if (asset.type.startsWith("video/")) {
-    stage.innerHTML = `<video src="${src}" autoplay muted playsinline loop></video>`;
+    stage.innerHTML = `<video src="${src}" autoplay muted playsinline></video>`;
     const video = stage.querySelector("video");
+    video.onended = done;
     video.onerror = () => {
       playerTimer = setTimeout(done, 5000);
     };
-    playerTimer = setTimeout(done, assetDuration(asset) * 1000);
   } else {
     stage.innerHTML = `<img src="${src}" alt="${asset.name}" />`;
     playerTimer = setTimeout(done, assetDuration(asset) * 1000);
