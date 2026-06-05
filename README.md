@@ -1,4 +1,6 @@
-# SignalDeck Signage MVP
+# TvDisplay
+
+SignalDeck Signage MVP for displaying media on all OPE TVs.
 
 A local-first proof of concept for a custom BrightSign-style signage dashboard and fullscreen player.
 
