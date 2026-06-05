@@ -1,6 +1,7 @@
 const DB_NAME = "signaldeck-media";
 const DB_VERSION = 1;
 const STATE_KEY = "signaldeck-state-v1";
+const SLIDE_DURATION_SECONDS = 120;
 
 const demoState = {
   activeView: "overview",
@@ -9,7 +10,7 @@ const demoState = {
       id: "asset-welcome",
       name: "Welcome Loop",
       type: "demo",
-      duration: 9,
+      duration: SLIDE_DURATION_SECONDS,
       size: 0,
       createdAt: Date.now() - 86400000,
       color: "blue",
@@ -20,7 +21,7 @@ const demoState = {
       id: "asset-events",
       name: "Today at a Glance",
       type: "demo",
-      duration: 8,
+      duration: SLIDE_DURATION_SECONDS,
       size: 0,
       createdAt: Date.now() - 7200000,
       color: "green",
@@ -75,15 +76,45 @@ function uid(prefix) {
 function loadState() {
   try {
     const saved = localStorage.getItem(STATE_KEY);
-    return saved ? JSON.parse(saved) : structuredClone(demoState);
+    return normalizeState(saved ? JSON.parse(saved) : structuredClone(demoState));
   } catch {
-    return structuredClone(demoState);
+    return normalizeState(structuredClone(demoState));
   }
 }
 
 function saveState() {
   state.activeView = activeView;
   localStorage.setItem(STATE_KEY, JSON.stringify(state));
+}
+
+function normalizeState(nextState) {
+  return {
+    ...nextState,
+    assets: (nextState.assets || []).map((asset) => ({
+      ...asset,
+      duration: SLIDE_DURATION_SECONDS,
+    })),
+  };
+}
+
+function assetDuration(asset) {
+  return asset.duration || SLIDE_DURATION_SECONDS;
+}
+
+function formatDuration(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (!minutes) return `${seconds}s`;
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
+async function requestPersistentStorage() {
+  if (!navigator.storage?.persist) return false;
+  try {
+    return await navigator.storage.persist();
+  } catch {
+    return false;
+  }
 }
 
 function formatBytes(bytes) {
@@ -206,7 +237,7 @@ function shell(title, subtitle, body, actions = "") {
             .join("")}
         </nav>
         <div class="sidebar-note">
-          Player devices can open a screen URL in fullscreen kiosk mode. Media is stored locally in this browser for the MVP.
+          Player devices can open a screen URL in fullscreen kiosk mode. Media stays saved in this browser until you delete it.
         </div>
       </aside>
       <main class="main">
@@ -301,7 +332,7 @@ function renderOverview() {
         </div>
         <div class="panel-body">
           <div class="grid">
-            <div class="span-4 row"><div><p class="row-title">1. Upload</p><p class="row-meta">Images and videos are cached in IndexedDB on this device.</p></div></div>
+            <div class="span-4 row"><div><p class="row-title">1. Upload</p><p class="row-meta">Images and videos are saved on this device until you delete them.</p></div></div>
             <div class="span-4 row"><div><p class="row-title">2. Assign</p><p class="row-meta">Build playlists and assign them to player screens.</p></div></div>
             <div class="span-4 row"><div><p class="row-title">3. Play</p><p class="row-meta">Open a screen player URL on the signage computer in kiosk mode.</p></div></div>
           </div>
@@ -349,14 +380,14 @@ async function renderMedia() {
         <div class="panel-head">
           <div>
             <h3>Add Media</h3>
-            <p>Photos and MP4 videos for player loops</p>
+            <p>Photos and MP4 videos for 2-minute player loops</p>
           </div>
         </div>
         <div class="panel-body">
           <div class="upload-zone">
             <div>
               <p class="row-title">Upload local files</p>
-              <p class="row-meta">Stored in this browser for the MVP.</p>
+              <p class="row-meta">Saved in this browser until you delete them.</p>
               <input id="mediaUpload" type="file" accept="image/*,video/*" multiple />
             </div>
           </div>
@@ -370,8 +401,8 @@ async function renderMedia() {
               <input id="subhead" value="Ready to publish across every location" />
             </div>
             <div class="field">
-              <label for="duration">Duration</label>
-              <input id="duration" type="number" min="3" max="120" value="8" />
+              <label>Duration</label>
+              <input value="${formatDuration(SLIDE_DURATION_SECONDS)}" disabled />
             </div>
             <div class="field">
               <label for="color">Style</label>
@@ -411,7 +442,7 @@ async function renderMedia() {
       id: uid("asset"),
       name: document.querySelector("#headline").value.trim() || "Generated Slide",
       type: "demo",
-      duration: Number(document.querySelector("#duration").value || 8),
+      duration: SLIDE_DURATION_SECONDS,
       size: 0,
       createdAt: Date.now(),
       color: document.querySelector("#color").value,
@@ -447,7 +478,7 @@ async function hydrateAssetGrid() {
             <p class="row-title">${asset.name}</p>
             <p class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type} · ${formatBytes(asset.size)}</p>
             <div class="pill-row">
-              <span class="pill">${asset.duration || 10}s</span>
+              <span class="pill">${formatDuration(assetDuration(asset))}</span>
               <span class="pill">${formatTime(asset.createdAt)}</span>
             </div>
             <div class="pill-row">
@@ -464,6 +495,7 @@ async function hydrateAssetGrid() {
 }
 
 async function handleUpload(event) {
+  await requestPersistentStorage();
   const files = [...event.target.files];
   for (const file of files) {
     const id = uid("asset");
@@ -472,7 +504,7 @@ async function handleUpload(event) {
       id,
       name: file.name.replace(/\.[^.]+$/, ""),
       type: file.type || "application/octet-stream",
-      duration: file.type.startsWith("video/") ? 30 : 10,
+      duration: SLIDE_DURATION_SECONDS,
       size: file.size,
       createdAt: Date.now(),
     });
@@ -522,7 +554,7 @@ function renderPlaylists() {
                       <label class="check-item">
                         <input type="checkbox" name="assetIds" value="${asset.id}" />
                         <span>${asset.name}<br><small class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type}</small></span>
-                        <span class="pill">${asset.duration || 10}s</span>
+                        <span class="pill">${formatDuration(assetDuration(asset))}</span>
                       </label>`,
                   )
                   .join("")}
@@ -604,7 +636,7 @@ function playlistPreview(playlist) {
         <div class="row">
           <div>
             <p class="row-title">${index + 1}. ${asset.name}</p>
-            <p class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type} · ${asset.duration || 10} seconds</p>
+            <p class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type} · ${formatDuration(assetDuration(asset))}</p>
           </div>
           <span class="pill">${formatBytes(asset.size)}</span>
         </div>`,
@@ -895,7 +927,7 @@ async function showAsset(asset, done) {
           <p>${asset.subhead || "Generated signage slide"}</p>
         </div>
       </div>`;
-    playerTimer = setTimeout(done, (asset.duration || 8) * 1000);
+    playerTimer = setTimeout(done, assetDuration(asset) * 1000);
     return;
   }
 
@@ -907,16 +939,15 @@ async function showAsset(asset, done) {
   }
 
   if (asset.type.startsWith("video/")) {
-    stage.innerHTML = `<video src="${src}" autoplay muted playsinline></video>`;
+    stage.innerHTML = `<video src="${src}" autoplay muted playsinline loop></video>`;
     const video = stage.querySelector("video");
-    video.onended = done;
     video.onerror = () => {
       playerTimer = setTimeout(done, 5000);
     };
-    playerTimer = setTimeout(done, Math.max(10, asset.duration || 30) * 1000);
+    playerTimer = setTimeout(done, assetDuration(asset) * 1000);
   } else {
     stage.innerHTML = `<img src="${src}" alt="${asset.name}" />`;
-    playerTimer = setTimeout(done, (asset.duration || 10) * 1000);
+    playerTimer = setTimeout(done, assetDuration(asset) * 1000);
   }
 }
 
