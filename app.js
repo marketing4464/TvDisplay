@@ -1,6 +1,10 @@
 const DB_NAME = "signaldeck-media";
 const DB_VERSION = 1;
 const STATE_KEY = "signaldeck-state-v1";
+const STATE_API = "/api/state";
+const UPLOAD_API = "/api/upload";
+const MEDIA_API = "/api/media";
+const BLOB_CLIENT_URL = "https://esm.sh/@vercel/blob@2.4.0/client?bundle";
 const SLIDE_DURATION_SECONDS = 120;
 
 const demoState = {
@@ -26,7 +30,7 @@ const demoState = {
       createdAt: Date.now() - 7200000,
       color: "green",
       headline: "Today",
-      subhead: "Photos, video, schedules, and local playback",
+      subhead: "Photos, video, schedules, and shared playback",
     },
   ],
   playlists: [
@@ -62,10 +66,20 @@ const demoState = {
   ],
 };
 
-let state = loadState();
+let state = normalizeState(structuredClone(demoState));
 let activeView = state.activeView || "overview";
 let currentObjectUrls = [];
 let playerTimer = null;
+let playerRefreshTimer = null;
+let playerClockTimer = null;
+let saveQueue = Promise.resolve();
+let cloudStorageAvailable = false;
+let blobUpload = null;
+let syncStatus = {
+  label: "Loading",
+  detail: "Checking shared storage",
+  mode: "warning",
+};
 
 const app = document.querySelector("#app");
 
@@ -73,7 +87,33 @@ function uid(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function loadState() {
+async function loadState() {
+  try {
+    const response = await fetch(`${STATE_API}?v=${Date.now()}`, {
+      cache: "no-store",
+    });
+
+    if (response.ok) {
+      const payload = await response.json();
+      cloudStorageAvailable = true;
+      syncStatus = {
+        label: "Cloud saved",
+        detail: "Media and settings sync across computers",
+        mode: "online",
+      };
+      return normalizeState(payload.state || payload);
+    }
+  } catch {
+    // Fall through to the local browser cache when API routes are unavailable.
+  }
+
+  cloudStorageAvailable = false;
+  syncStatus = {
+    label: "Local only",
+    detail: "Set up Vercel Blob to sync across computers",
+    mode: "warning",
+  };
+
   try {
     const saved = localStorage.getItem(STATE_KEY);
     return normalizeState(saved ? JSON.parse(saved) : structuredClone(demoState));
@@ -85,6 +125,42 @@ function loadState() {
 function saveState() {
   state.activeView = activeView;
   localStorage.setItem(STATE_KEY, JSON.stringify(state));
+
+  if (!cloudStorageAvailable) {
+    return Promise.resolve();
+  }
+
+  const snapshot = JSON.stringify({
+    ...state,
+    activeView: "overview",
+  });
+  saveQueue = saveQueue
+    .then(async () => {
+      const response = await fetch(STATE_API, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: snapshot,
+      });
+
+      if (!response.ok) {
+        throw new Error("Cloud save failed");
+      }
+
+      syncStatus = {
+        label: "Cloud saved",
+        detail: `Last saved ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`,
+        mode: "online",
+      };
+    })
+    .catch(() => {
+      syncStatus = {
+        label: "Save issue",
+        detail: "Changes are saved locally; check Vercel Blob setup",
+        mode: "warning",
+      };
+    });
+
+  return saveQueue;
 }
 
 function normalizeState(nextState) {
@@ -108,6 +184,22 @@ function normalizeState(nextState) {
 
 function isVideoAsset(asset) {
   return asset.type?.startsWith("video/");
+}
+
+function sanitizeFilename(name) {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 90);
+}
+
+async function loadBlobUploader() {
+  if (!blobUpload) {
+    const module = await import(BLOB_CLIENT_URL);
+    blobUpload = module.upload;
+  }
+  return blobUpload;
 }
 
 function assetDuration(asset) {
@@ -241,6 +333,7 @@ function clearObjectUrls() {
 
 async function assetSrc(asset) {
   if (asset.type === "demo") return null;
+  if (asset.url) return asset.url;
   const blob = await getBlob(asset.id);
   if (!blob) return null;
   const url = URL.createObjectURL(blob);
@@ -279,7 +372,7 @@ function shell(title, subtitle, body, actions = "") {
             .join("")}
         </nav>
         <div class="sidebar-note">
-          Player devices can open a screen URL in fullscreen kiosk mode. Media stays saved in this browser until you delete it.
+          Player devices can open a screen URL in fullscreen kiosk mode. Media, screens, playlists, and schedules sync through Vercel Blob when storage is connected.
         </div>
       </aside>
       <main class="main">
@@ -288,7 +381,13 @@ function shell(title, subtitle, body, actions = "") {
             <h2>${title}</h2>
             <p>${subtitle}</p>
           </div>
-          <div class="actions">${actions}</div>
+          <div class="actions">
+            <span class="sync-badge ${syncStatus.mode}">
+              <strong>${syncStatus.label}</strong>
+              <small>${syncStatus.detail}</small>
+            </span>
+            ${actions}
+          </div>
         </header>
         <section class="content">${body}</section>
       </main>
@@ -302,6 +401,8 @@ function shell(title, subtitle, body, actions = "") {
 
 function render() {
   clearTimeout(playerTimer);
+  clearTimeout(playerRefreshTimer);
+  clearInterval(playerClockTimer);
   clearObjectUrls();
 
   const playerMatch = window.location.hash.match(/^#\/player\/(.+)$/);
@@ -374,7 +475,7 @@ function renderOverview() {
         </div>
         <div class="panel-body">
           <div class="grid">
-            <div class="span-4 row"><div><p class="row-title">1. Upload</p><p class="row-meta">Images and videos are saved on this device until you delete them.</p></div></div>
+            <div class="span-4 row"><div><p class="row-title">1. Upload</p><p class="row-meta">Images and videos are saved to the shared media library until you delete them.</p></div></div>
             <div class="span-4 row"><div><p class="row-title">2. Assign</p><p class="row-meta">Build playlists and assign them to player screens.</p></div></div>
             <div class="span-4 row"><div><p class="row-title">3. Play</p><p class="row-meta">Open a screen player URL on the signage computer in kiosk mode.</p></div></div>
           </div>
@@ -385,7 +486,7 @@ function renderOverview() {
 
   shell(
     "Overview",
-    "A local-first proof of concept for replacing the BrightSign workflow.",
+    "A shared signage dashboard for replacing the BrightSign workflow.",
     body,
     `<button class="btn primary" data-jump="media">Upload media</button>`,
   );
@@ -429,7 +530,7 @@ async function renderMedia() {
           <div class="upload-zone">
             <div>
               <p class="row-title">Upload local files</p>
-              <p class="row-meta">Saved in this browser until you delete them.</p>
+              <p class="row-meta">${cloudStorageAvailable ? "Saved to the shared Vercel media library." : "Saved in this browser until Vercel Blob is connected."}</p>
               <input id="mediaUpload" type="file" accept="image/*,video/*" multiple />
             </div>
           </div>
@@ -474,7 +575,7 @@ async function renderMedia() {
     </div>
   `;
 
-  shell("Media", "Upload and cache photos or videos for signage playback.", body);
+  shell("Media", "Upload photos or videos for shared signage playback.", body);
   await hydrateAssetGrid();
 
   document.querySelector("#mediaUpload").addEventListener("change", handleUpload);
@@ -539,33 +640,74 @@ async function hydrateAssetGrid() {
 async function handleUpload(event) {
   await requestPersistentStorage();
   const files = [...event.target.files];
-  for (const file of files) {
-    const id = uid("asset");
-    const isVideo = file.type.startsWith("video/");
-    const videoDuration = await readVideoDuration(file);
-    await putBlob(id, file);
-    state.assets.unshift({
-      id,
-      name: file.name.replace(/\.[^.]+$/, ""),
-      type: file.type || "application/octet-stream",
-      durationMode: isVideo ? "full-video" : "fixed",
-      duration: isVideo ? videoDuration : SLIDE_DURATION_SECONDS,
-      size: file.size,
-      createdAt: Date.now(),
-    });
+  const uploadInput = event.target;
+  uploadInput.disabled = true;
+
+  try {
+    for (const file of files) {
+      const id = uid("asset");
+      const isVideo = file.type.startsWith("video/");
+      const videoDuration = await readVideoDuration(file);
+
+      const asset = {
+        id,
+        name: file.name.replace(/\.[^.]+$/, ""),
+        type: file.type || "application/octet-stream",
+        durationMode: isVideo ? "full-video" : "fixed",
+        duration: isVideo ? videoDuration : SLIDE_DURATION_SECONDS,
+        size: file.size,
+        createdAt: Date.now(),
+      };
+
+      if (cloudStorageAvailable) {
+        const uploadToBlob = await loadBlobUploader();
+        const pathname = `media/${Date.now()}-${id}-${sanitizeFilename(file.name) || "upload"}`;
+        const blob = await uploadToBlob(pathname, file, {
+          access: "public",
+          handleUploadUrl: UPLOAD_API,
+        });
+        asset.url = blob.url;
+        asset.pathname = blob.pathname;
+      } else {
+        await putBlob(id, file);
+      }
+
+      state.assets.unshift(asset);
+    }
+
+    await saveState();
+  } catch (error) {
+    syncStatus = {
+      label: "Upload failed",
+      detail: error.message || "Try again after checking storage setup",
+      mode: "warning",
+    };
+  } finally {
+    uploadInput.disabled = false;
+    uploadInput.value = "";
   }
-  saveState();
   renderMedia();
 }
 
 async function removeAsset(assetId) {
+  const asset = state.assets.find((item) => item.id === assetId);
   state.assets = state.assets.filter((asset) => asset.id !== assetId);
   state.playlists = state.playlists.map((playlist) => ({
     ...playlist,
     assetIds: playlist.assetIds.filter((id) => id !== assetId),
   }));
-  await deleteBlob(assetId);
-  saveState();
+
+  if (asset?.url && cloudStorageAvailable) {
+    await fetch(MEDIA_API, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: asset.url, pathname: asset.pathname }),
+    });
+  } else {
+    await deleteBlob(assetId);
+  }
+
+  await saveState();
   render();
 }
 
@@ -783,6 +925,18 @@ function screenManagerRows() {
             <p class="row-title">${screen.name}</p>
             <p class="row-meta">${screen.location || "No location"} · ${playlistName(screen.playlistId)}</p>
             <p class="row-meta">${screen.notes || "No notes"}</p>
+            <label class="inline-control">
+              <span>Playlist</span>
+              <select data-screen-playlist="${screen.id}">
+                <option value="">Unassigned</option>
+                ${state.playlists
+                  .map(
+                    (playlist) =>
+                      `<option value="${playlist.id}" ${playlist.id === screen.playlistId ? "selected" : ""}>${playlist.name}</option>`,
+                  )
+                  .join("")}
+              </select>
+            </label>
             <a class="preview-link" href="${playerUrl(screen.id)}">${playerUrl(screen.id)}</a>
           </div>
           <div class="actions">
@@ -796,6 +950,15 @@ function screenManagerRows() {
 }
 
 function bindScreenActions() {
+  document.querySelectorAll("[data-screen-playlist]").forEach((select) => {
+    select.addEventListener("change", async () => {
+      const screen = state.screens.find((item) => item.id === select.dataset.screenPlaylist);
+      if (!screen) return;
+      screen.playlistId = select.value;
+      await saveState();
+      renderScreens();
+    });
+  });
   document.querySelectorAll("[data-copy]").forEach((button) => {
     button.addEventListener("click", async () => {
       await navigator.clipboard.writeText(playerUrl(button.dataset.copy));
@@ -890,13 +1053,7 @@ function renderSchedule() {
     saveState();
     renderSchedule();
   });
-  document.querySelectorAll("[data-delete-schedule]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.schedules = state.schedules.filter((schedule) => schedule.id !== button.dataset.deleteSchedule);
-      saveState();
-      renderSchedule();
-    });
-  });
+  bindScheduleActions();
 }
 
 function scheduleRows() {
@@ -904,16 +1061,81 @@ function scheduleRows() {
   return `<div class="list">${state.schedules
     .map(
       (schedule) => `
-        <div class="row">
-          <div>
-            <p class="row-title">${schedule.name}</p>
-            <p class="row-meta">${screenName(schedule.screenId)} · ${playlistName(schedule.playlistId)}</p>
-            <p class="row-meta">${schedule.days}, ${schedule.start} to ${schedule.end}</p>
+        <form class="schedule-rule" data-schedule-form="${schedule.id}">
+          <div class="field">
+            <label for="${schedule.id}-name">Name</label>
+            <input id="${schedule.id}-name" name="name" value="${schedule.name}" required />
           </div>
-          <button class="btn small danger" data-delete-schedule="${schedule.id}">Delete</button>
-        </div>`,
+          <div class="field">
+            <label for="${schedule.id}-screen">Screen</label>
+            <select id="${schedule.id}-screen" name="screenId" required>
+              ${state.screens
+                .map(
+                  (screen) =>
+                    `<option value="${screen.id}" ${screen.id === schedule.screenId ? "selected" : ""}>${screen.name}</option>`,
+                )
+                .join("")}
+            </select>
+          </div>
+          <div class="field">
+            <label for="${schedule.id}-playlist">Playlist</label>
+            <select id="${schedule.id}-playlist" name="playlistId" required>
+              ${state.playlists
+                .map(
+                  (playlist) =>
+                    `<option value="${playlist.id}" ${playlist.id === schedule.playlistId ? "selected" : ""}>${playlist.name}</option>`,
+                )
+                .join("")}
+            </select>
+          </div>
+          <div class="field">
+            <label for="${schedule.id}-days">Days</label>
+            <input id="${schedule.id}-days" name="days" value="${schedule.days}" />
+          </div>
+          <div class="field">
+            <label for="${schedule.id}-start">Start</label>
+            <input id="${schedule.id}-start" name="start" type="time" value="${schedule.start}" />
+          </div>
+          <div class="field">
+            <label for="${schedule.id}-end">End</label>
+            <input id="${schedule.id}-end" name="end" type="time" value="${schedule.end}" />
+          </div>
+          <div class="schedule-actions">
+            <button class="btn small primary" type="submit">Save</button>
+            <button class="btn small danger" type="button" data-delete-schedule="${schedule.id}">Delete</button>
+          </div>
+        </form>`,
     )
     .join("")}</div>`;
+}
+
+function bindScheduleActions() {
+  document.querySelectorAll("[data-schedule-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const schedule = state.schedules.find((item) => item.id === form.dataset.scheduleForm);
+      if (!schedule) return;
+
+      const formData = new FormData(form);
+      schedule.name = String(formData.get("name") || "").trim();
+      schedule.screenId = String(formData.get("screenId") || "");
+      schedule.playlistId = String(formData.get("playlistId") || "");
+      schedule.days = String(formData.get("days") || "").trim();
+      schedule.start = String(formData.get("start") || "");
+      schedule.end = String(formData.get("end") || "");
+
+      await saveState();
+      renderSchedule();
+    });
+  });
+
+  document.querySelectorAll("[data-delete-schedule]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.schedules = state.schedules.filter((schedule) => schedule.id !== button.dataset.deleteSchedule);
+      await saveState();
+      renderSchedule();
+    });
+  });
 }
 
 async function renderPlayer(screenId) {
@@ -947,7 +1169,7 @@ async function renderPlayer(screenId) {
   `;
 
   const clock = document.querySelector("#playerClock");
-  setInterval(() => {
+  playerClockTimer = setInterval(() => {
     clock.textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   }, 1000);
 
@@ -958,6 +1180,25 @@ async function renderPlayer(screenId) {
     await showAsset(asset, playNext);
   };
   playNext();
+  schedulePlayerRefresh(screenId);
+}
+
+function schedulePlayerRefresh(screenId) {
+  if (!cloudStorageAvailable) return;
+  playerRefreshTimer = setTimeout(async () => {
+    const previous = JSON.stringify(state);
+    const nextState = await loadState();
+    const next = JSON.stringify(nextState);
+
+    if (previous !== next) {
+      state = nextState;
+      activeView = state.activeView || activeView;
+      render();
+      return;
+    }
+
+    schedulePlayerRefresh(screenId);
+  }, 60000);
 }
 
 async function showAsset(asset, done) {
@@ -1021,4 +1262,12 @@ function screenName(id) {
 }
 
 window.addEventListener("hashchange", render);
-render();
+
+async function init() {
+  app.innerHTML = `<div class="player-error"><div><h1>SignalDeck</h1><p>Loading shared display data...</p></div></div>`;
+  state = await loadState();
+  activeView = state.activeView || "overview";
+  render();
+}
+
+init();
