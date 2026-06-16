@@ -1369,17 +1369,8 @@ async function renderPlayer(screenId) {
   app.innerHTML = `
     <section class="player">
       <div id="playerStage" class="player-stage"></div>
-      <div class="player-osd">
-        <span>${screen.name} · ${playlist.name}</span>
-        <span id="playerClock"></span>
-      </div>
     </section>
   `;
-
-  const clock = document.querySelector("#playerClock");
-  playerClockTimer = setInterval(() => {
-    clock.textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  }, 1000);
 
   let index = 0;
   const playNext = async () => {
