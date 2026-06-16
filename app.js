@@ -1,10 +1,12 @@
 const DB_NAME = "signaldeck-media";
 const DB_VERSION = 1;
 const STATE_KEY = "signaldeck-state-v1";
-const STATE_API = "/api/state";
-const UPLOAD_API = "/api/upload";
-const MEDIA_API = "/api/media";
-const BLOB_CLIENT_URL = "https://esm.sh/@vercel/blob@2.4.0/client?bundle";
+const SUPABASE_URL = "https://hvwnnvpafepmoczlvaea.supabase.co";
+const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_wHaZZ7sJDX80QKDl2p9C2w_yawu78Jp";
+const SUPABASE_CLIENT_URL = "https://esm.sh/@supabase/supabase-js@2.51.0?bundle";
+const SUPABASE_BUCKET = "signaldeck-media";
+const SUPABASE_STATE_TABLE = "signaldeck_state";
+const SUPABASE_STATE_ID = "default";
 const SLIDE_DURATION_SECONDS = 120;
 
 const demoState = {
@@ -74,7 +76,7 @@ let playerRefreshTimer = null;
 let playerClockTimer = null;
 let saveQueue = Promise.resolve();
 let cloudStorageAvailable = false;
-let blobUpload = null;
+let supabaseClient = null;
 let syncStatus = {
   label: "Loading",
   detail: "Checking shared storage",
@@ -89,28 +91,32 @@ function uid(prefix) {
 
 async function loadState() {
   try {
-    const response = await fetch(`${STATE_API}?v=${Date.now()}`, {
-      cache: "no-store",
-    });
+    const supabase = await getSupabaseClient();
+    const { data, error } = await supabase
+      .from(SUPABASE_STATE_TABLE)
+      .select("state")
+      .eq("id", SUPABASE_STATE_ID)
+      .maybeSingle();
 
-    if (response.ok) {
-      const payload = await response.json();
-      cloudStorageAvailable = true;
-      syncStatus = {
-        label: "Cloud saved",
-        detail: "Media and settings sync across computers",
-        mode: "online",
-      };
-      return normalizeState(payload.state || payload);
+    if (error) {
+      throw error;
     }
+
+    cloudStorageAvailable = true;
+    syncStatus = {
+      label: "Supabase saved",
+      detail: "Media and settings sync across computers",
+      mode: "online",
+    };
+    return normalizeState(data?.state || structuredClone(demoState));
   } catch {
-    // Fall through to the local browser cache when API routes are unavailable.
+    // Fall through to the local browser cache when Supabase is unavailable.
   }
 
   cloudStorageAvailable = false;
   syncStatus = {
     label: "Local only",
-    detail: "Set up Vercel Blob to sync across computers",
+    detail: "Check Supabase setup to sync across computers",
     mode: "warning",
   };
 
@@ -136,18 +142,19 @@ function saveState() {
   });
   saveQueue = saveQueue
     .then(async () => {
-      const response = await fetch(STATE_API, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: snapshot,
+      const supabase = await getSupabaseClient();
+      const { error } = await supabase.from(SUPABASE_STATE_TABLE).upsert({
+        id: SUPABASE_STATE_ID,
+        state: JSON.parse(snapshot),
+        updated_at: new Date().toISOString(),
       });
 
-      if (!response.ok) {
-        throw new Error("Cloud save failed");
+      if (error) {
+        throw error;
       }
 
       syncStatus = {
-        label: "Cloud saved",
+        label: "Supabase saved",
         detail: `Last saved ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`,
         mode: "online",
       };
@@ -155,7 +162,7 @@ function saveState() {
     .catch(() => {
       syncStatus = {
         label: "Save issue",
-        detail: "Changes are saved locally; check Vercel Blob setup",
+        detail: "Changes are saved locally; check Supabase setup",
         mode: "warning",
       };
     });
@@ -194,12 +201,47 @@ function sanitizeFilename(name) {
     .slice(0, 90);
 }
 
-async function loadBlobUploader() {
-  if (!blobUpload) {
-    const module = await import(BLOB_CLIENT_URL);
-    blobUpload = module.upload;
+async function getSupabaseClient() {
+  if (!supabaseClient) {
+    const { createClient } = await import(SUPABASE_CLIENT_URL);
+    supabaseClient = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+    });
   }
-  return blobUpload;
+  return supabaseClient;
+}
+
+async function uploadMediaFile(file, assetId) {
+  const supabase = await getSupabaseClient();
+  const path = `media/${Date.now()}-${assetId}-${sanitizeFilename(file.name) || "upload"}`;
+  const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, file, {
+    cacheControl: "3600",
+    contentType: file.type || "application/octet-stream",
+    upsert: false,
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  const { data: publicUrl } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(data.path);
+  return {
+    path: data.path,
+    url: publicUrl.publicUrl,
+  };
+}
+
+async function deleteMediaFile(path) {
+  if (!path) return;
+  const supabase = await getSupabaseClient();
+  const { error } = await supabase.storage.from(SUPABASE_BUCKET).remove([path]);
+  if (error) {
+    throw error;
+  }
 }
 
 function assetDuration(asset) {
@@ -372,7 +414,7 @@ function shell(title, subtitle, body, actions = "") {
             .join("")}
         </nav>
         <div class="sidebar-note">
-          Player devices can open a screen URL in fullscreen kiosk mode. Media, screens, playlists, and schedules sync through Vercel Blob when storage is connected.
+          Player devices can open a screen URL in fullscreen kiosk mode. Media, screens, playlists, and schedules sync through Supabase when storage is connected.
         </div>
       </aside>
       <main class="main">
@@ -530,7 +572,7 @@ async function renderMedia() {
           <div class="upload-zone">
             <div>
               <p class="row-title">Upload local files</p>
-              <p class="row-meta">${cloudStorageAvailable ? "Saved to the shared Vercel media library." : "Saved in this browser until Vercel Blob is connected."}</p>
+              <p class="row-meta">${cloudStorageAvailable ? "Saved to the shared Supabase media library." : "Saved in this browser until Supabase is connected."}</p>
               <input id="mediaUpload" type="file" accept="image/*,video/*" multiple />
             </div>
           </div>
@@ -660,14 +702,9 @@ async function handleUpload(event) {
       };
 
       if (cloudStorageAvailable) {
-        const uploadToBlob = await loadBlobUploader();
-        const pathname = `media/${Date.now()}-${id}-${sanitizeFilename(file.name) || "upload"}`;
-        const blob = await uploadToBlob(pathname, file, {
-          access: "public",
-          handleUploadUrl: UPLOAD_API,
-        });
-        asset.url = blob.url;
-        asset.pathname = blob.pathname;
+        const media = await uploadMediaFile(file, id);
+        asset.url = media.url;
+        asset.path = media.path;
       } else {
         await putBlob(id, file);
       }
@@ -698,11 +735,7 @@ async function removeAsset(assetId) {
   }));
 
   if (asset?.url && cloudStorageAvailable) {
-    await fetch(MEDIA_API, {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: asset.url, pathname: asset.pathname }),
-    });
+    await deleteMediaFile(asset.path || asset.pathname);
   } else {
     await deleteBlob(assetId);
   }

@@ -4,7 +4,7 @@ Use TvDisplay to upload media, build playlists, create screen/player links, and 
 
 ## Important Notes
 
-- Uploaded media is saved to the shared Vercel media library when cloud storage is connected.
+- Uploaded media is saved to the shared Supabase media library when cloud storage is connected.
 - Media stays saved until you click `Delete`.
 - Uploaded videos play for their full video length.
 - Images and generated slides play for 120 seconds.
@@ -155,10 +155,11 @@ If a TV is showing the wrong content, check:
 - Is the mini PC powered on?
 - Is the browser still open on the player URL?
 - Is the correct playlist assigned to that screen?
-- Does the dashboard show `Cloud saved` instead of `Local only`?
+- Does the dashboard show `Supabase saved` instead of `Local only`?
 
 ## Current Limitations
 
 - There is no login/user management yet.
+- The current Supabase setup allows public read/write access so player computers can sync without signing in.
 - Player screens pick up changes on a short polling interval, not instantly.
 - Each mini PC/channel must be configured separately.
