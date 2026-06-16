@@ -329,6 +329,9 @@ function uploadMetadataHeader(metadata) {
 
 async function formatUploadResponseError(response) {
   const body = await response.text();
+  if (response.status === 413) {
+    return "Supabase rejected this video because it is larger than the project-wide Storage file size limit. Open Supabase Storage Settings and raise the Global file size limit to 5 GB or higher.";
+  }
   if (body) return body;
   if (response.statusText) return response.statusText;
   return "Video upload failed. Try a smaller MP4 file or check Supabase storage.";
