@@ -49,6 +49,7 @@ Playback timing:
 - Videos play to the end of the video.
 - Images play for 2 minutes.
 - Generated slides play for 2 minutes.
+- Large videos upload in chunks and may take a few minutes. The current video upload limit is 1 GB per file.
 
 To remove media, click `Delete` on that media item.
 

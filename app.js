@@ -3,11 +3,17 @@ const DB_VERSION = 1;
 const STATE_KEY = "signaldeck-state-v1";
 const SUPABASE_URL = "https://hvwnnvpafepmoczlvaea.supabase.co";
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_wHaZZ7sJDX80QKDl2p9C2w_yawu78Jp";
+const SUPABASE_STORAGE_AUTH_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh2d25udnBhZmVwbW9jemx2YWVhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE2MTEyODAsImV4cCI6MjA5NzE4NzI4MH0.VgaZEPWMn6o4a0pbwYxo3_56M34eEnQvaywcGfGQRds";
+const SUPABASE_PROJECT_REF = "hvwnnvpafepmoczlvaea";
 const SUPABASE_CLIENT_URL = "https://esm.sh/@supabase/supabase-js@2.51.0?bundle";
+const TUS_CLIENT_URL = "https://esm.sh/tus-js-client@4.3.1?bundle";
 const SUPABASE_BUCKET = "signaldeck-media";
 const SUPABASE_STATE_TABLE = "signaldeck_state";
 const SUPABASE_STATE_ID = "default";
 const SLIDE_DURATION_SECONDS = 120;
+const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
 
 const demoState = {
   activeView: "overview",
@@ -218,6 +224,20 @@ async function getSupabaseClient() {
 async function uploadMediaFile(file, assetId) {
   const supabase = await getSupabaseClient();
   const path = `media/${Date.now()}-${assetId}-${sanitizeFilename(file.name) || "upload"}`;
+
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new Error(`"${file.name}" is larger than the 1 GB upload limit.`);
+  }
+
+  if (file.size > LARGE_UPLOAD_THRESHOLD_BYTES || file.type.startsWith("video/")) {
+    await uploadLargeMediaFile(path, file);
+    const { data: publicUrl } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(path);
+    return {
+      path,
+      url: publicUrl.publicUrl,
+    };
+  }
+
   const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, file, {
     cacheControl: "3600",
     contentType: file.type || "application/octet-stream",
@@ -233,6 +253,52 @@ async function uploadMediaFile(file, assetId) {
     path: data.path,
     url: publicUrl.publicUrl,
   };
+}
+
+async function uploadLargeMediaFile(path, file) {
+  const tus = await import(TUS_CLIENT_URL);
+  const endpoint = `https://${SUPABASE_PROJECT_REF}.storage.supabase.co/storage/v1/upload/resumable`;
+
+  return new Promise((resolve, reject) => {
+    const upload = new tus.Upload(file, {
+      endpoint,
+      retryDelays: [0, 3000, 5000, 10000, 20000],
+      headers: {
+        apikey: SUPABASE_PUBLISHABLE_KEY,
+        authorization: `Bearer ${SUPABASE_STORAGE_AUTH_KEY}`,
+        "x-upsert": "false",
+      },
+      metadata: {
+        bucketName: SUPABASE_BUCKET,
+        objectName: path,
+        contentType: file.type || "application/octet-stream",
+        cacheControl: "3600",
+      },
+      chunkSize: LARGE_UPLOAD_THRESHOLD_BYTES,
+      uploadDataDuringCreation: true,
+      removeFingerprintOnSuccess: true,
+      onError(error) {
+        reject(new Error(formatUploadError(error)));
+      },
+      onSuccess() {
+        resolve();
+      },
+    });
+
+    upload.findPreviousUploads().then((previousUploads) => {
+      if (previousUploads.length) {
+        upload.resumeFromPreviousUpload(previousUploads[0]);
+      }
+      upload.start();
+    }, reject);
+  });
+}
+
+function formatUploadError(error) {
+  const body = error?.originalResponse?.getBody?.();
+  if (body) return body;
+  if (error?.message) return error.message;
+  return "Video upload failed. Try a smaller MP4 file or check Supabase storage.";
 }
 
 async function deleteMediaFile(path) {
