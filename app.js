@@ -7,7 +7,6 @@ const SUPABASE_STORAGE_AUTH_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh2d25udnBhZmVwbW9jemx2YWVhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE2MTEyODAsImV4cCI6MjA5NzE4NzI4MH0.VgaZEPWMn6o4a0pbwYxo3_56M34eEnQvaywcGfGQRds";
 const SUPABASE_PROJECT_REF = "hvwnnvpafepmoczlvaea";
 const SUPABASE_CLIENT_URL = "https://esm.sh/@supabase/supabase-js@2.51.0?bundle";
-const TUS_CLIENT_URL = "https://esm.sh/tus-js-client@4.3.1?bundle";
 const SUPABASE_BUCKET = "signaldeck-media";
 const SUPABASE_STATE_TABLE = "signaldeck_state";
 const SUPABASE_STATE_ID = "default";
@@ -266,48 +265,72 @@ async function uploadMediaFile(file, assetId) {
 }
 
 async function uploadLargeMediaFile(path, file) {
-  const tus = await import(TUS_CLIENT_URL);
   const endpoint = `https://${SUPABASE_PROJECT_REF}.storage.supabase.co/storage/v1/upload/resumable`;
+  const uploadUrl = await createResumableUpload(endpoint, path, file);
+  let offset = 0;
 
-  return new Promise((resolve, reject) => {
-    const upload = new tus.Upload(file, {
-      endpoint,
-      retryDelays: [0, 3000, 5000, 10000, 20000],
+  while (offset < file.size) {
+    const chunk = file.slice(offset, offset + LARGE_UPLOAD_THRESHOLD_BYTES);
+    const response = await fetch(uploadUrl, {
+      method: "PATCH",
       headers: {
+        "Tus-Resumable": "1.0.0",
+        "Upload-Offset": String(offset),
+        "Content-Type": "application/offset+octet-stream",
         apikey: SUPABASE_PUBLISHABLE_KEY,
         authorization: `Bearer ${SUPABASE_STORAGE_AUTH_KEY}`,
-        "x-upsert": "false",
       },
-      metadata: {
+      body: chunk,
+    });
+
+    if (!response.ok) {
+      throw new Error(await formatUploadResponseError(response));
+    }
+
+    offset = Number(response.headers.get("Upload-Offset")) || offset + chunk.size;
+  }
+}
+
+async function createResumableUpload(endpoint, path, file) {
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Tus-Resumable": "1.0.0",
+      "Upload-Length": String(file.size),
+      "Upload-Metadata": uploadMetadataHeader({
         bucketName: SUPABASE_BUCKET,
         objectName: path,
         contentType: file.type || "application/octet-stream",
         cacheControl: "3600",
-      },
-      chunkSize: LARGE_UPLOAD_THRESHOLD_BYTES,
-      uploadDataDuringCreation: true,
-      removeFingerprintOnSuccess: true,
-      onError(error) {
-        reject(new Error(formatUploadError(error)));
-      },
-      onSuccess() {
-        resolve();
-      },
-    });
-
-    upload.findPreviousUploads().then((previousUploads) => {
-      if (previousUploads.length) {
-        upload.resumeFromPreviousUpload(previousUploads[0]);
-      }
-      upload.start();
-    }, reject);
+      }),
+      apikey: SUPABASE_PUBLISHABLE_KEY,
+      authorization: `Bearer ${SUPABASE_STORAGE_AUTH_KEY}`,
+      "x-upsert": "false",
+    },
   });
+
+  if (!response.ok) {
+    throw new Error(await formatUploadResponseError(response));
+  }
+
+  const location = response.headers.get("Location");
+  if (!location) {
+    throw new Error("Supabase did not return a resumable upload URL.");
+  }
+
+  return new URL(location, endpoint).toString();
 }
 
-function formatUploadError(error) {
-  const body = error?.originalResponse?.getBody?.();
+function uploadMetadataHeader(metadata) {
+  return Object.entries(metadata)
+    .map(([key, value]) => `${key} ${btoa(String(value))}`)
+    .join(",");
+}
+
+async function formatUploadResponseError(response) {
+  const body = await response.text();
   if (body) return body;
-  if (error?.message) return error.message;
+  if (response.statusText) return response.statusText;
   return "Video upload failed. Try a smaller MP4 file or check Supabase storage.";
 }
 
