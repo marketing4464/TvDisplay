@@ -13,6 +13,34 @@ const SUPABASE_STATE_ID = "default";
 const SLIDE_DURATION_SECONDS = 120;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+const ALL_DAY_INDEXES = [0, 1, 2, 3, 4, 5, 6];
+const DAY_ALIASES = {
+  sun: 0,
+  sunday: 0,
+  sundays: 0,
+  mon: 1,
+  monday: 1,
+  mondays: 1,
+  tue: 2,
+  tues: 2,
+  tuesday: 2,
+  tuesdays: 2,
+  wed: 3,
+  weds: 3,
+  wednesday: 3,
+  wednesdays: 3,
+  thu: 4,
+  thur: 4,
+  thurs: 4,
+  thursday: 4,
+  thursdays: 4,
+  fri: 5,
+  friday: 5,
+  fridays: 5,
+  sat: 6,
+  saturday: 6,
+  saturdays: 6,
+};
 
 const demoState = {
   activeView: "overview",
@@ -565,7 +593,7 @@ function render() {
 function renderOverview() {
   const activeScreens = state.screens.filter((screen) => screen.status === "online").length;
   const assignedScreens = state.screens.filter((screen) => screen.playlistId).length;
-  const nextSchedule = state.schedules[0];
+  const activeSchedules = state.schedules.filter((schedule) => scheduleMatches(schedule));
 
   const body = `
     <div class="metric-grid">
@@ -591,23 +619,12 @@ function renderOverview() {
         <div class="panel-head">
           <div>
             <h3>Current Schedule</h3>
-            <p>Simple daypart rules for the MVP</p>
+            <p>Active daypart rules right now</p>
           </div>
           <button class="btn small ghost" data-jump="schedule">Edit</button>
         </div>
         <div class="panel-body">
-          ${
-            nextSchedule
-              ? `<div class="row">
-                  <div>
-                    <p class="row-title">${nextSchedule.name}</p>
-                    <p class="row-meta">${nextSchedule.days}, ${nextSchedule.start} to ${nextSchedule.end}</p>
-                    <p class="row-meta">${screenName(nextSchedule.screenId)} plays ${playlistName(nextSchedule.playlistId)}</p>
-                  </div>
-                  <span class="status online">Active</span>
-                </div>`
-              : `<div class="empty">No schedules yet.</div>`
-          }
+          ${currentScheduleRows(activeSchedules)}
         </div>
       </section>
       <section class="panel span-12">
@@ -645,10 +662,29 @@ function screenRows(screens) {
         <div class="row">
           <div>
             <p class="row-title">${screen.name}</p>
-            <p class="row-meta">${screen.location || "No location"} · ${playlistName(screen.playlistId)}</p>
+            <p class="row-meta">${screen.location || "No location"} · ${currentPlaybackLabel(screen)}</p>
             <p class="row-meta">Last seen ${formatTime(screen.lastSeen)}</p>
           </div>
           <span class="status ${screen.status}">${screen.status}</span>
+        </div>`,
+    )
+    .join("")}</div>`;
+}
+
+function currentScheduleRows(activeSchedules) {
+  if (!state.schedules.length) return `<div class="empty">No schedules yet.</div>`;
+  if (!activeSchedules.length) return `<div class="empty">No schedule is active right now.</div>`;
+
+  return `<div class="list">${activeSchedules
+    .map(
+      (schedule) => `
+        <div class="row">
+          <div>
+            <p class="row-title">${schedule.name}</p>
+            <p class="row-meta">${schedule.days}, ${schedule.start} to ${schedule.end}</p>
+            <p class="row-meta">${screenName(schedule.screenId)} plays ${playlistName(schedule.playlistId)}</p>
+          </div>
+          <span class="status online">Active</span>
         </div>`,
     )
     .join("")}</div>`;
@@ -1235,7 +1271,7 @@ function renderSchedule() {
         <div class="panel-head">
           <div>
             <h3>Schedule Rules</h3>
-            <p>The player currently uses assigned playlist first, then schedule rules</p>
+            <p>The player uses active schedule rules first, then the assigned playlist</p>
           </div>
         </div>
         <div class="panel-body">
@@ -1437,15 +1473,109 @@ async function showAsset(asset, done) {
 }
 
 function activePlaylistForScreen(screen) {
-  const scheduled = state.schedules.find((schedule) => schedule.screenId === screen.id && scheduleMatches(schedule));
+  const scheduled = activeScheduleForScreen(screen);
   if (scheduled) return state.playlists.find((playlist) => playlist.id === scheduled.playlistId);
   return state.playlists.find((playlist) => playlist.id === screen.playlistId);
 }
 
-function scheduleMatches(schedule) {
-  const now = new Date();
-  const current = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  return current >= schedule.start && current <= schedule.end;
+function activeScheduleForScreen(screen, date = new Date()) {
+  return state.schedules.find((schedule) => schedule.screenId === screen.id && scheduleMatches(schedule, date));
+}
+
+function scheduleMatches(schedule, date = new Date()) {
+  return scheduleMatchesAt(schedule, date);
+}
+
+function scheduleMatchesAt(schedule, date) {
+  const start = timeToMinutes(schedule.start);
+  const end = timeToMinutes(schedule.end);
+  const current = date.getHours() * 60 + date.getMinutes();
+
+  if (start === null || end === null) return false;
+  if (start === end) return scheduleRunsOnDay(schedule, date.getDay());
+
+  if (end > start) {
+    return current >= start && current < end && scheduleRunsOnDay(schedule, date.getDay());
+  }
+
+  if (current >= start) {
+    return scheduleRunsOnDay(schedule, date.getDay());
+  }
+
+  if (current < end) {
+    return scheduleRunsOnDay(schedule, previousDayIndex(date.getDay()));
+  }
+
+  return false;
+}
+
+function scheduleRunsOnDay(schedule, dayIndex) {
+  return scheduleDayIndexes(schedule.days).includes(dayIndex);
+}
+
+function scheduleDayIndexes(days) {
+  const text = String(days || "").trim().toLowerCase();
+  if (!text || /\b(all|daily|every day|everyday)\b/.test(text)) return ALL_DAY_INDEXES;
+
+  const indexes = new Set();
+  if (/\bweekdays?\b/.test(text)) {
+    [1, 2, 3, 4, 5].forEach((day) => indexes.add(day));
+  }
+  if (/\bweekends?\b/.test(text)) {
+    [0, 6].forEach((day) => indexes.add(day));
+  }
+
+  const rangePattern = /([a-z]+)\s*(?:-|to|through|thru)\s*([a-z]+)/g;
+  for (const match of text.matchAll(rangePattern)) {
+    const start = dayIndexFromToken(match[1]);
+    const end = dayIndexFromToken(match[2]);
+    if (start !== null && end !== null) {
+      addDayRange(indexes, start, end);
+    }
+  }
+
+  text.split(/[^a-z]+/).forEach((token) => {
+    const day = dayIndexFromToken(token);
+    if (day !== null) indexes.add(day);
+  });
+
+  return indexes.size ? [...indexes] : ALL_DAY_INDEXES;
+}
+
+function addDayRange(indexes, start, end) {
+  let day = start;
+  indexes.add(day);
+  while (day !== end) {
+    day = (day + 1) % 7;
+    indexes.add(day);
+  }
+}
+
+function dayIndexFromToken(token) {
+  const key = String(token || "")
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+  return DAY_ALIASES[key] ?? null;
+}
+
+function timeToMinutes(value) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+function previousDayIndex(dayIndex) {
+  return (dayIndex + 6) % 7;
+}
+
+function currentPlaybackLabel(screen) {
+  const scheduled = activeScheduleForScreen(screen);
+  if (scheduled) return `${playlistName(scheduled.playlistId)} via ${scheduled.name}`;
+  return playlistName(screen.playlistId);
 }
 
 function findAsset(id) {
