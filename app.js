@@ -12,7 +12,7 @@ const SUPABASE_STATE_TABLE = "signaldeck_state";
 const SUPABASE_STATE_ID = "default";
 const SLIDE_DURATION_SECONDS = 120;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
-const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
 
 const demoState = {
   activeView: "overview",
@@ -235,7 +235,7 @@ async function uploadMediaFile(file, assetId) {
   const path = `media/${Date.now()}-${assetId}-${sanitizeFilename(file.name) || "upload"}`;
 
   if (file.size > MAX_UPLOAD_BYTES) {
-    throw new Error(`"${file.name}" is larger than the 1 GB upload limit.`);
+    throw new Error(`"${file.name}" is larger than the 5 GB upload limit.`);
   }
 
   if (file.size > LARGE_UPLOAD_THRESHOLD_BYTES || file.type.startsWith("video/")) {
