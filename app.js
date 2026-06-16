@@ -76,6 +76,7 @@ const demoState = {
 
 let state = normalizeState(structuredClone(demoState));
 let activeView = state.activeView || "overview";
+let editingPlaylistId = null;
 let currentObjectUrls = [];
 let playerTimer = null;
 let playerRefreshTimer = null;
@@ -205,6 +206,15 @@ function sanitizeFilename(name) {
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 90);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 async function getSupabaseClient() {
@@ -811,10 +821,12 @@ async function removeAsset(assetId) {
 }
 
 function renderPlaylists() {
-  const selected = state.playlists[0];
+  const selected =
+    state.playlists.find((playlist) => playlist.id === editingPlaylistId) || state.playlists[0] || null;
+  editingPlaylistId = selected?.id || null;
   const body = `
     <div class="grid">
-      <section class="panel span-5">
+      <section class="panel span-4">
         <div class="panel-head">
           <div>
             <h3>Create Playlist</h3>
@@ -833,18 +845,7 @@ function renderPlaylists() {
             </div>
             <div class="field full">
               <label>Assets</label>
-              <div class="check-list">
-                ${state.assets
-                  .map(
-                    (asset) => `
-                      <label class="check-item">
-                        <input type="checkbox" name="assetIds" value="${asset.id}" />
-                        <span>${asset.name}<br><small class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type}</small></span>
-                        <span class="pill">${assetDurationLabel(asset)}</span>
-                      </label>`,
-                  )
-                  .join("")}
-              </div>
+              ${assetCheckboxes()}
             </div>
             <div class="field full">
               <button class="btn primary" type="submit">Create playlist</button>
@@ -852,7 +853,7 @@ function renderPlaylists() {
           </form>
         </div>
       </section>
-      <section class="panel span-7">
+      <section class="panel span-8">
         <div class="panel-head">
           <div>
             <h3>Playlists</h3>
@@ -863,11 +864,22 @@ function renderPlaylists() {
           ${playlistRows()}
         </div>
       </section>
-      <section class="panel span-12">
+      <section class="panel span-6">
+        <div class="panel-head">
+          <div>
+            <h3>Edit Playlist</h3>
+            <p>${selected ? escapeHtml(selected.name) : "No playlist selected"}</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          ${selected ? playlistEditForm(selected) : `<div class="empty">Create a playlist to edit its media.</div>`}
+        </div>
+      </section>
+      <section class="panel span-6">
         <div class="panel-head">
           <div>
             <h3>Playlist Preview</h3>
-            <p>${selected ? selected.name : "No playlist selected"}</p>
+            <p>${selected ? escapeHtml(selected.name) : "No playlist selected"}</p>
           </div>
         </div>
         <div class="panel-body">
@@ -890,10 +902,11 @@ function renderPlaylists() {
       updatedAt: Date.now(),
     };
     state.playlists.unshift(playlist);
+    editingPlaylistId = playlist.id;
     saveState();
     renderPlaylists();
   });
-  bindPlaylistDelete();
+  bindPlaylistActions();
 }
 
 function playlistRows() {
@@ -903,12 +916,53 @@ function playlistRows() {
       (playlist) => `
         <div class="row">
           <div>
-            <p class="row-title">${playlist.name}</p>
-            <p class="row-meta">${playlist.description || "No description"} · ${playlist.assetIds.length} item${playlist.assetIds.length === 1 ? "" : "s"}</p>
+            <p class="row-title">${escapeHtml(playlist.name)}</p>
+            <p class="row-meta">${escapeHtml(playlist.description || "No description")} · ${playlist.assetIds.length} item${playlist.assetIds.length === 1 ? "" : "s"}</p>
             <p class="row-meta">Updated ${formatTime(playlist.updatedAt)}</p>
           </div>
-          <button class="btn small danger" data-delete-playlist="${playlist.id}">Delete</button>
+          <div class="actions">
+            <button class="btn small ghost" data-edit-playlist="${playlist.id}">Edit</button>
+            <button class="btn small danger" data-delete-playlist="${playlist.id}">Delete</button>
+          </div>
         </div>`,
+    )
+    .join("")}</div>`;
+}
+
+function playlistEditForm(playlist) {
+  return `
+    <form id="editPlaylistForm" class="form-grid">
+      <input type="hidden" name="playlistId" value="${playlist.id}" />
+      <div class="field full">
+        <label for="editPlaylistName">Playlist name</label>
+        <input id="editPlaylistName" name="name" value="${escapeHtml(playlist.name)}" required />
+      </div>
+      <div class="field full">
+        <label for="editPlaylistDescription">Description</label>
+        <textarea id="editPlaylistDescription" name="description">${escapeHtml(playlist.description || "")}</textarea>
+      </div>
+      <div class="field full">
+        <label>Media in this playlist</label>
+        ${assetCheckboxes(playlist.assetIds)}
+      </div>
+      <div class="field full">
+        <button class="btn primary" type="submit">Save playlist</button>
+      </div>
+    </form>`;
+}
+
+function assetCheckboxes(selectedIds = []) {
+  const selected = new Set(selectedIds);
+  if (!state.assets.length) return `<div class="empty">Upload media before building a playlist.</div>`;
+
+  return `<div class="check-list">${state.assets
+    .map(
+      (asset) => `
+        <label class="check-item">
+          <input type="checkbox" name="assetIds" value="${asset.id}" ${selected.has(asset.id) ? "checked" : ""} />
+          <span>${escapeHtml(asset.name)}<br><small class="row-meta">${escapeHtml(asset.type === "demo" ? "Generated slide" : asset.type)}</small></span>
+          <span class="pill">${assetDurationLabel(asset)}</span>
+        </label>`,
     )
     .join("")}</div>`;
 }
@@ -921,8 +975,8 @@ function playlistPreview(playlist) {
       (asset, index) => `
         <div class="row">
           <div>
-            <p class="row-title">${index + 1}. ${asset.name}</p>
-            <p class="row-meta">${asset.type === "demo" ? "Generated slide" : asset.type} · ${assetDurationLabel(asset)}</p>
+            <p class="row-title">${index + 1}. ${escapeHtml(asset.name)}</p>
+            <p class="row-meta">${escapeHtml(asset.type === "demo" ? "Generated slide" : asset.type)} · ${assetDurationLabel(asset)}</p>
           </div>
           <span class="pill">${formatBytes(asset.size)}</span>
         </div>`,
@@ -930,7 +984,14 @@ function playlistPreview(playlist) {
     .join("")}</div>`;
 }
 
-function bindPlaylistDelete() {
+function bindPlaylistActions() {
+  document.querySelectorAll("[data-edit-playlist]").forEach((button) => {
+    button.addEventListener("click", () => {
+      editingPlaylistId = button.dataset.editPlaylist;
+      renderPlaylists();
+    });
+  });
+
   document.querySelectorAll("[data-delete-playlist]").forEach((button) => {
     button.addEventListener("click", () => {
       const id = button.dataset.deletePlaylist;
@@ -939,9 +1000,31 @@ function bindPlaylistDelete() {
         screen.playlistId === id ? { ...screen, playlistId: "" } : screen,
       );
       state.schedules = state.schedules.filter((schedule) => schedule.playlistId !== id);
+      if (editingPlaylistId === id) {
+        editingPlaylistId = state.playlists[0]?.id || null;
+      }
       saveState();
       renderPlaylists();
     });
+  });
+
+  const editForm = document.querySelector("#editPlaylistForm");
+  if (!editForm) return;
+
+  editForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const id = form.get("playlistId");
+    const playlist = state.playlists.find((item) => item.id === id);
+    if (!playlist) return;
+
+    playlist.name = String(form.get("name") || "").trim() || "Untitled Playlist";
+    playlist.description = String(form.get("description") || "").trim();
+    playlist.assetIds = form.getAll("assetIds");
+    playlist.updatedAt = Date.now();
+
+    await saveState();
+    renderPlaylists();
   });
 }
 

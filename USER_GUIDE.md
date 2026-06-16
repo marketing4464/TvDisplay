@@ -73,6 +73,17 @@ Generated slides are useful for quick messages, promotions, announcements, or te
 
 The playlist will loop the selected media in order.
 
+## Edit a Playlist
+
+1. Click `Playlists`.
+2. Find the playlist in the `Playlists` list.
+3. Click `Edit`.
+4. Check media items to add them, or uncheck media items to remove them.
+5. Update the playlist name or description if needed.
+6. Click `Save playlist`.
+
+The player keeps the same screen URL. Assigned screens will pick up the playlist change on their next refresh.
+
 ## Create or Assign a Screen
 
 1. Click `Screens`.
