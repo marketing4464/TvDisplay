@@ -1390,9 +1390,7 @@ async function renderPlayer(screenId) {
     return;
   }
 
-  screen.status = "online";
-  screen.lastSeen = Date.now();
-  saveState();
+  markScreenOnline(screenId);
 
   const playlist = activePlaylistForScreen(screen);
   const assets = playlist ? playlist.assetIds.map((id) => findAsset(id)).filter(Boolean) : [];
@@ -1421,19 +1419,29 @@ async function renderPlayer(screenId) {
 function schedulePlayerRefresh(screenId) {
   if (!cloudStorageAvailable) return;
   playerRefreshTimer = setTimeout(async () => {
-    const previous = JSON.stringify(state);
+    const previous = playerPlaybackSignature(screenId, state);
     const nextState = await loadState();
-    const next = JSON.stringify(nextState);
+    const next = playerPlaybackSignature(screenId, nextState);
 
+    state = nextState;
+    activeView = state.activeView || activeView;
     if (previous !== next) {
-      state = nextState;
-      activeView = state.activeView || activeView;
       render();
       return;
     }
 
+    markScreenOnline(screenId);
     schedulePlayerRefresh(screenId);
   }, 60000);
+}
+
+function markScreenOnline(screenId) {
+  const screen = state.screens.find((item) => item.id === screenId);
+  if (!screen) return;
+
+  screen.status = "online";
+  screen.lastSeen = Date.now();
+  saveState();
 }
 
 async function showAsset(asset, done) {
@@ -1473,13 +1481,52 @@ async function showAsset(asset, done) {
 }
 
 function activePlaylistForScreen(screen) {
-  const scheduled = activeScheduleForScreen(screen);
-  if (scheduled) return state.playlists.find((playlist) => playlist.id === scheduled.playlistId);
-  return state.playlists.find((playlist) => playlist.id === screen.playlistId);
+  return activePlaylistForScreenInState(state, screen);
 }
 
 function activeScheduleForScreen(screen, date = new Date()) {
-  return state.schedules.find((schedule) => schedule.screenId === screen.id && scheduleMatches(schedule, date));
+  return activeScheduleForScreenInState(state, screen, date);
+}
+
+function activePlaylistForScreenInState(snapshot, screen, date = new Date()) {
+  const scheduled = activeScheduleForScreenInState(snapshot, screen, date);
+  if (scheduled) return snapshot.playlists.find((playlist) => playlist.id === scheduled.playlistId);
+  return snapshot.playlists.find((playlist) => playlist.id === screen.playlistId);
+}
+
+function activeScheduleForScreenInState(snapshot, screen, date = new Date()) {
+  return snapshot.schedules.find((schedule) => schedule.screenId === screen.id && scheduleMatches(schedule, date));
+}
+
+function playerPlaybackSignature(screenId, snapshot, date = new Date()) {
+  const screen = snapshot.screens.find((item) => item.id === screenId);
+  if (!screen) return JSON.stringify({ screenId, missing: true });
+
+  const playlist = activePlaylistForScreenInState(snapshot, screen, date);
+  if (!playlist) return JSON.stringify({ screenId, playlistId: null });
+
+  const assets = playlist.assetIds
+    .map((id) => snapshot.assets.find((asset) => asset.id === id))
+    .filter(Boolean)
+    .map((asset) => ({
+      id: asset.id,
+      name: asset.name,
+      type: asset.type,
+      path: asset.path,
+      url: asset.url,
+      duration: assetDuration(asset),
+      durationMode: asset.durationMode,
+      headline: asset.headline,
+      subhead: asset.subhead,
+      color: asset.color,
+    }));
+
+  return JSON.stringify({
+    screenId,
+    playlistId: playlist.id,
+    assetIds: playlist.assetIds,
+    assets,
+  });
 }
 
 function scheduleMatches(schedule, date = new Date()) {
