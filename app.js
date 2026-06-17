@@ -1407,10 +1407,11 @@ async function renderPlayer(screenId) {
   `;
 
   let index = 0;
+  const shouldRotate = assets.length > 1;
   const playNext = async () => {
     const asset = assets[index % assets.length];
     index += 1;
-    await showAsset(asset, playNext);
+    await showAsset(asset, playNext, shouldRotate);
   };
   playNext();
   schedulePlayerRefresh(screenId);
@@ -1444,7 +1445,7 @@ function markScreenOnline(screenId) {
   saveState();
 }
 
-async function showAsset(asset, done) {
+async function showAsset(asset, done, shouldRotate = true) {
   const stage = document.querySelector("#playerStage");
   if (!stage) return;
 
@@ -1456,7 +1457,9 @@ async function showAsset(asset, done) {
           <p>${asset.subhead || "Generated signage slide"}</p>
         </div>
       </div>`;
-    playerTimer = setTimeout(done, assetDuration(asset) * 1000);
+    if (shouldRotate) {
+      playerTimer = setTimeout(done, assetDuration(asset) * 1000);
+    }
     return;
   }
 
@@ -1468,15 +1471,19 @@ async function showAsset(asset, done) {
   }
 
   if (asset.type.startsWith("video/")) {
-    stage.innerHTML = `<video src="${src}" autoplay muted playsinline></video>`;
+    stage.innerHTML = `<video src="${src}" autoplay muted playsinline ${shouldRotate ? "" : "loop"}></video>`;
     const video = stage.querySelector("video");
-    video.onended = done;
+    video.onended = shouldRotate ? done : null;
     video.onerror = () => {
-      playerTimer = setTimeout(done, 5000);
+      if (shouldRotate) {
+        playerTimer = setTimeout(done, 5000);
+      }
     };
   } else {
     stage.innerHTML = `<img src="${src}" alt="${asset.name}" />`;
-    playerTimer = setTimeout(done, assetDuration(asset) * 1000);
+    if (shouldRotate) {
+      playerTimer = setTimeout(done, assetDuration(asset) * 1000);
+    }
   }
 }
 
