@@ -12,7 +12,7 @@ const SUPABASE_STATE_TABLE = "signaldeck_state";
 const SUPABASE_STATE_ID = "default";
 const SLIDE_DURATION_SECONDS = 120;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
-const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
 const ALL_DAY_INDEXES = [0, 1, 2, 3, 4, 5, 6];
 const DAY_ALIASES = {
   sun: 0,
@@ -263,7 +263,7 @@ async function uploadMediaFile(file, assetId) {
   const path = `media/${Date.now()}-${assetId}-${sanitizeFilename(file.name) || "upload"}`;
 
   if (file.size > MAX_UPLOAD_BYTES) {
-    throw new Error(`"${file.name}" is larger than the 5 GB upload limit.`);
+    throw new Error(`"${file.name}" is larger than the 50 GB upload limit.`);
   }
 
   if (file.size > LARGE_UPLOAD_THRESHOLD_BYTES || file.type.startsWith("video/")) {
@@ -358,7 +358,7 @@ function uploadMetadataHeader(metadata) {
 async function formatUploadResponseError(response) {
   const body = await response.text();
   if (response.status === 413) {
-    return "Supabase rejected this video because it is larger than the project-wide Storage file size limit. Open Supabase Storage Settings and raise the Global file size limit to 5 GB or higher.";
+    return "Supabase rejected this video because it is larger than the project-wide Storage file size limit. Open Supabase Storage Settings and raise the Global file size limit to 50 GB or higher.";
   }
   if (body) return body;
   if (response.statusText) return response.statusText;
