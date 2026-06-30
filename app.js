@@ -1,6 +1,7 @@
 const DB_NAME = "signaldeck-media";
 const DB_VERSION = 1;
 const STATE_KEY = "signaldeck-state-v1";
+const CANONICAL_HOST = "tv-displayope.vercel.app";
 const SUPABASE_URL = "https://hvwnnvpafepmoczlvaea.supabase.co";
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_wHaZZ7sJDX80QKDl2p9C2w_yawu78Jp";
 const SUPABASE_STORAGE_AUTH_KEY =
@@ -125,6 +126,16 @@ let syncStatus = {
 };
 
 const app = document.querySelector("#app");
+
+function redirectToCanonicalHost() {
+  if (!window.location.hostname.endsWith(".vercel.app")) return false;
+  if (window.location.hostname === CANONICAL_HOST) return false;
+
+  const canonicalUrl = new URL(window.location.href);
+  canonicalUrl.hostname = CANONICAL_HOST;
+  window.location.replace(canonicalUrl.toString());
+  return true;
+}
 
 function uid(prefix) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -1870,6 +1881,8 @@ function screenName(id) {
 window.addEventListener("hashchange", render);
 
 async function init() {
+  if (redirectToCanonicalHost()) return;
+
   app.innerHTML = `<div class="player-error"><div><h1>SignalDeck</h1><p>Loading shared display data...</p></div></div>`;
   state = await loadState();
   activeView = state.activeView || "overview";
