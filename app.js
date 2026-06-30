@@ -12,6 +12,8 @@ const SUPABASE_STATE_TABLE = "signaldeck_state";
 const SUPABASE_STATE_ID = "default";
 const SLIDE_DURATION_SECONDS = 120;
 const PLAYER_SYNC_INTERVAL_MS = 10000;
+const PLAYER_HEARTBEAT_INTERVAL_MS = 60000;
+const PLAYER_BLANK_RECOVERY_MS = 45000;
 const MEDIA_READY_TIMEOUT_MS = 30000;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
@@ -110,6 +112,7 @@ let currentObjectUrls = [];
 let playerTimer = null;
 let playerRefreshTimer = null;
 let playerClockTimer = null;
+let playerBlankRecoveryTimer = null;
 let playerSession = null;
 let activePlayerObjectUrl = null;
 let saveQueue = Promise.resolve();
@@ -588,6 +591,7 @@ function shell(title, subtitle, body, actions = "") {
 function render() {
   clearTimeout(playerTimer);
   clearTimeout(playerRefreshTimer);
+  clearTimeout(playerBlankRecoveryTimer);
   clearInterval(playerClockTimer);
   clearObjectUrls();
 
@@ -1451,10 +1455,13 @@ async function renderPlayer(screenId) {
     </section>
   `;
 
+  showPlayerMessage(screen.name, "Loading playlist...", { loading: true });
+
   playerSession = {
     screenId,
     cursor: 0,
     currentAssetId: null,
+    lastHeartbeatAt: Date.now(),
     refreshToken: screen.refreshToken || "",
     queueSignature: "",
   };
@@ -1480,6 +1487,7 @@ async function renderPlayer(screenId) {
   };
 
   playNext();
+  scheduleBlankRecoveryCheck(screenId);
   schedulePlayerRefresh(screenId);
 }
 
@@ -1502,9 +1510,27 @@ function schedulePlayerRefresh(screenId) {
       return;
     }
 
-    markScreenOnline(screenId, { persist: false });
+    const shouldSaveHeartbeat =
+      playerSession && Date.now() - playerSession.lastHeartbeatAt >= PLAYER_HEARTBEAT_INTERVAL_MS;
+    markScreenOnline(screenId, { persist: shouldSaveHeartbeat });
+    if (shouldSaveHeartbeat && playerSession) {
+      playerSession.lastHeartbeatAt = Date.now();
+    }
     schedulePlayerRefresh(screenId);
   }, PLAYER_SYNC_INTERVAL_MS);
+}
+
+function scheduleBlankRecoveryCheck(screenId) {
+  clearTimeout(playerBlankRecoveryTimer);
+  playerBlankRecoveryTimer = setTimeout(() => {
+    const stage = document.querySelector("#playerStage");
+    const hasRenderedMedia = stage?.querySelector("img, video") || stage?.dataset.loading !== "true";
+    if (!hasRenderedMedia && window.location.hash === `#/player/${screenId}`) {
+      window.location.reload();
+      return;
+    }
+    scheduleBlankRecoveryCheck(screenId);
+  }, PLAYER_BLANK_RECOVERY_MS);
 }
 
 function markScreenOnline(screenId, { persist = true } = {}) {
@@ -1522,6 +1548,7 @@ async function showAsset(asset, done, shouldRotate = true) {
 
   if (asset.type === "demo") {
     replaceActivePlayerObjectUrl(null);
+    stage.dataset.loading = "false";
     stage.innerHTML = `
       <div class="demo-slide">
         <div>
@@ -1555,6 +1582,7 @@ async function showAsset(asset, done, shouldRotate = true) {
     try {
       await waitForVideoReady(video);
       replaceActivePlayerObjectUrl(src);
+      stage.dataset.loading = "false";
       stage.replaceChildren(video);
 
       if (shouldRotate) {
@@ -1598,6 +1626,7 @@ async function showAsset(asset, done, shouldRotate = true) {
     try {
       await waitForImageReady(image);
       replaceActivePlayerObjectUrl(src);
+      stage.dataset.loading = "false";
       stage.replaceChildren(image);
       if (shouldRotate) playerTimer = setTimeout(done, assetDuration(asset) * 1000);
     } catch {
@@ -1646,9 +1675,10 @@ function waitForVideoReady(video) {
   });
 }
 
-function showPlayerMessage(title, message) {
+function showPlayerMessage(title, message, options = {}) {
   const stage = document.querySelector("#playerStage");
   if (!stage) return;
+  stage.dataset.loading = options.loading ? "true" : "false";
   stage.innerHTML = `
     <div class="demo-slide">
       <div>
