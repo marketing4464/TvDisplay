@@ -82,7 +82,7 @@ The playlist will loop the selected media in order.
 5. Update the playlist name or description if needed.
 6. Click `Save playlist`.
 
-The player keeps the same screen URL. Assigned screens will pick up the playlist change on their next refresh.
+The player keeps the same screen URL. Assigned screens sync playlist changes in the background and start using the updated playlist after the current image or video finishes.
 
 ## Create or Assign a Screen
 
@@ -159,7 +159,7 @@ To update content:
 6. Go to `Screens`.
 7. Use the screen row's playlist selector to assign the updated playlist.
 
-Player screens check for shared updates about once per minute. Refresh the player browser if you need a change to appear immediately.
+Player screens check for shared updates automatically. They do not need to be refreshed; updates start after the current image or video finishes so playback is not interrupted.
 
 If a TV is showing the wrong content, check:
 
@@ -173,5 +173,5 @@ If a TV is showing the wrong content, check:
 
 - There is no login/user management yet.
 - The current Supabase setup allows public read/write access so player computers can sync without signing in.
-- Player screens pick up changes on a short polling interval, not instantly.
+- Player screens apply playlist changes after the current image or video finishes, so playback is not interrupted.
 - Each mini PC/channel must be configured separately.

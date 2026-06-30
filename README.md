@@ -76,5 +76,5 @@ chromium-browser --kiosk http://localhost:5173/#/player/screen-lobby
 
 - There is no login/user management yet, so anyone with the dashboard URL can make changes.
 - The current Supabase policies allow public read/write access so unattended player devices can sync without signing in.
-- Player pages refresh shared state about once per minute, so updates are not instant.
+- Player pages sync shared state in the background and apply playlist changes after the current image or video finishes.
 - Video wall synchronization is not frame-accurate yet.

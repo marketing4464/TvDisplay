@@ -11,6 +11,7 @@ const SUPABASE_BUCKET = "signaldeck-media";
 const SUPABASE_STATE_TABLE = "signaldeck_state";
 const SUPABASE_STATE_ID = "default";
 const SLIDE_DURATION_SECONDS = 120;
+const PLAYER_SYNC_INTERVAL_MS = 10000;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
 const ALL_DAY_INDEXES = [0, 1, 2, 3, 4, 5, 6];
@@ -108,6 +109,7 @@ let currentObjectUrls = [];
 let playerTimer = null;
 let playerRefreshTimer = null;
 let playerClockTimer = null;
+let playerSession = null;
 let saveQueue = Promise.resolve();
 let cloudStorageAvailable = false;
 let supabaseClient = null;
@@ -583,6 +585,7 @@ function render() {
     return;
   }
 
+  playerSession = null;
   if (activeView === "media") renderMedia();
   else if (activeView === "playlists") renderPlaylists();
   else if (activeView === "screens") renderScreens();
@@ -1392,27 +1395,39 @@ async function renderPlayer(screenId) {
 
   markScreenOnline(screenId);
 
-  const playlist = activePlaylistForScreen(screen);
-  const assets = playlist ? playlist.assetIds.map((id) => findAsset(id)).filter(Boolean) : [];
-
-  if (!playlist || !assets.length) {
-    app.innerHTML = `<div class="player-error"><div><h1>${screen.name}</h1><p>No playable playlist is assigned.</p></div></div>`;
-    return;
-  }
-
   app.innerHTML = `
     <section class="player">
       <div id="playerStage" class="player-stage"></div>
     </section>
   `;
 
-  let index = 0;
-  const shouldRotate = assets.length > 1;
-  const playNext = async () => {
-    const asset = assets[index % assets.length];
-    index += 1;
-    await showAsset(asset, playNext, shouldRotate);
+  playerSession = {
+    screenId,
+    cursor: 0,
+    currentAssetId: null,
+    queueSignature: "",
   };
+
+  const playNext = async () => {
+    const queue = playerQueueForScreen(screenId, state);
+    if (!queue.assets.length) {
+      showPlayerMessage(queue.screen?.name || "SignalDeck", "No playable playlist is assigned.");
+      playerTimer = setTimeout(playNext, PLAYER_SYNC_INTERVAL_MS);
+      return;
+    }
+
+    if (playerSession.queueSignature !== queue.signature) {
+      const currentIndex = queue.assets.findIndex((asset) => asset.id === playerSession.currentAssetId);
+      playerSession.cursor = currentIndex >= 0 ? currentIndex + 1 : 0;
+      playerSession.queueSignature = queue.signature;
+    }
+
+    const asset = queue.assets[playerSession.cursor % queue.assets.length];
+    playerSession.currentAssetId = asset.id;
+    playerSession.cursor += 1;
+    await showAsset(asset, playNext);
+  };
+
   playNext();
   schedulePlayerRefresh(screenId);
 }
@@ -1420,35 +1435,34 @@ async function renderPlayer(screenId) {
 function schedulePlayerRefresh(screenId) {
   if (!cloudStorageAvailable) return;
   playerRefreshTimer = setTimeout(async () => {
-    const previous = playerPlaybackSignature(screenId, state);
     const nextState = await loadState();
-    const next = playerPlaybackSignature(screenId, nextState);
-
     state = nextState;
     activeView = state.activeView || activeView;
-    if (previous !== next) {
+
+    if (!state.screens.some((screen) => screen.id === screenId)) {
       render();
       return;
     }
 
-    markScreenOnline(screenId);
+    markScreenOnline(screenId, { persist: false });
     schedulePlayerRefresh(screenId);
-  }, 60000);
+  }, PLAYER_SYNC_INTERVAL_MS);
 }
 
-function markScreenOnline(screenId) {
+function markScreenOnline(screenId, { persist = true } = {}) {
   const screen = state.screens.find((item) => item.id === screenId);
   if (!screen) return;
 
   screen.status = "online";
   screen.lastSeen = Date.now();
-  saveState();
+  if (persist) saveState();
 }
 
 async function showAsset(asset, done, shouldRotate = true) {
   const stage = document.querySelector("#playerStage");
   if (!stage) return;
 
+  clearObjectUrls();
   if (asset.type === "demo") {
     stage.innerHTML = `
       <div class="demo-slide">
@@ -1487,6 +1501,18 @@ async function showAsset(asset, done, shouldRotate = true) {
   }
 }
 
+function showPlayerMessage(title, message) {
+  const stage = document.querySelector("#playerStage");
+  if (!stage) return;
+  stage.innerHTML = `
+    <div class="demo-slide">
+      <div>
+        <h1>${escapeHtml(title)}</h1>
+        <p>${escapeHtml(message)}</p>
+      </div>
+    </div>`;
+}
+
 function activePlaylistForScreen(screen) {
   return activePlaylistForScreenInState(state, screen);
 }
@@ -1503,6 +1529,28 @@ function activePlaylistForScreenInState(snapshot, screen, date = new Date()) {
 
 function activeScheduleForScreenInState(snapshot, screen, date = new Date()) {
   return snapshot.schedules.find((schedule) => schedule.screenId === screen.id && scheduleMatches(schedule, date));
+}
+
+function playerQueueForScreen(screenId, snapshot, date = new Date()) {
+  const screen = snapshot.screens.find((item) => item.id === screenId);
+  if (!screen) {
+    return {
+      screen: null,
+      playlist: null,
+      assets: [],
+      signature: JSON.stringify({ screenId, missing: true }),
+    };
+  }
+
+  const playlist = activePlaylistForScreenInState(snapshot, screen, date);
+  const assets = playlist ? playlist.assetIds.map((id) => snapshot.assets.find((asset) => asset.id === id)).filter(Boolean) : [];
+
+  return {
+    screen,
+    playlist,
+    assets,
+    signature: playerPlaybackSignature(screenId, snapshot, date),
+  };
 }
 
 function playerPlaybackSignature(screenId, snapshot, date = new Date()) {
