@@ -731,10 +731,40 @@ function requestScreenRefresh(screen, now = Date.now()) {
   screen.refreshRequestedAt = now;
 }
 
+function publishContentUpdate({ screenIds = [], playlistIds = [], allScreens = false } = {}) {
+  const now = Date.now();
+  const targetScreenIds = new Set(screenIds);
+  const targetPlaylistIds = new Set(playlistIds);
+  const hasExplicitTargets = allScreens || screenIds.length > 0 || playlistIds.length > 0;
+
+  if (allScreens) {
+    state.screens.forEach((screen) => targetScreenIds.add(screen.id));
+  }
+
+  if (targetPlaylistIds.size) {
+    state.screens.forEach((screen) => {
+      if (targetPlaylistIds.has(screen.playlistId)) targetScreenIds.add(screen.id);
+    });
+    state.schedules.forEach((schedule) => {
+      if (targetPlaylistIds.has(schedule.playlistId)) targetScreenIds.add(schedule.screenId);
+    });
+  }
+
+  state.contentToken = `${now}-${uid("content")}`;
+  state.contentUpdatedAt = now;
+  state.screens.forEach((screen) => {
+    if (!hasExplicitTargets || allScreens || targetScreenIds.has(screen.id)) {
+      screen.contentToken = state.contentToken;
+      screen.contentUpdatedAt = now;
+    }
+  });
+}
+
 async function deployMediaUpdates(button = null) {
   const now = Date.now();
   state.deployToken = `${now}-${uid("deploy")}`;
   state.deployRequestedAt = now;
+  publishContentUpdate({ allScreens: true });
   state.screens.forEach((screen) => requestScreenRefresh(screen, now));
   await saveState();
 
@@ -831,6 +861,7 @@ async function renderMedia() {
       subhead: document.querySelector("#subhead").value.trim() || "Ready for playback",
     };
     state.assets.unshift(asset);
+    publishContentUpdate({ allScreens: true });
     saveState();
     renderMedia();
   });
@@ -908,6 +939,7 @@ async function handleUpload(event) {
       state.assets.unshift(asset);
     }
 
+    publishContentUpdate({ allScreens: true });
     await saveState();
   } catch (error) {
     syncStatus = {
@@ -929,6 +961,7 @@ async function removeAsset(assetId) {
     ...playlist,
     assetIds: playlist.assetIds.filter((id) => id !== assetId),
   }));
+  publishContentUpdate({ allScreens: true });
 
   if (asset?.url && cloudStorageAvailable) {
     await deleteMediaFile(asset.path || asset.pathname);
@@ -1123,6 +1156,7 @@ function bindPlaylistActions() {
       if (editingPlaylistId === id) {
         editingPlaylistId = state.playlists[0]?.id || null;
       }
+      publishContentUpdate({ allScreens: true });
       saveState();
       renderPlaylists();
     });
@@ -1142,6 +1176,7 @@ function bindPlaylistActions() {
     playlist.description = String(form.get("description") || "").trim();
     playlist.assetIds = form.getAll("assetIds");
     playlist.updatedAt = Date.now();
+    publishContentUpdate({ playlistIds: [id] });
 
     await saveState();
     renderPlaylists();
@@ -1258,6 +1293,7 @@ function bindScreenActions() {
       const screen = state.screens.find((item) => item.id === select.dataset.screenPlaylist);
       if (!screen) return;
       screen.playlistId = select.value;
+      publishContentUpdate({ screenIds: [screen.id] });
       await saveState();
       renderScreens();
     });
@@ -1274,6 +1310,7 @@ function bindScreenActions() {
       const screen = state.screens.find((item) => item.id === button.dataset.refreshScreen);
       if (!screen) return;
       requestScreenRefresh(screen);
+      publishContentUpdate({ screenIds: [screen.id] });
       await saveState();
       renderScreens();
     });
@@ -1353,15 +1390,17 @@ function renderSchedule() {
   const form = document.querySelector("#scheduleForm");
   form.addEventListener("submit", (event) => {
     event.preventDefault();
+    const screenId = document.querySelector("#scheduleScreen").value;
     state.schedules.unshift({
       id: uid("schedule"),
       name: document.querySelector("#scheduleName").value.trim(),
-      screenId: document.querySelector("#scheduleScreen").value,
+      screenId,
       playlistId: document.querySelector("#schedulePlaylist").value,
       days: document.querySelector("#scheduleDays").value.trim(),
       start: document.querySelector("#scheduleStart").value,
       end: document.querySelector("#scheduleEnd").value,
     });
+    publishContentUpdate({ screenIds: [screenId] });
     saveState();
     renderSchedule();
   });
@@ -1427,6 +1466,8 @@ function bindScheduleActions() {
       event.preventDefault();
       const schedule = state.schedules.find((item) => item.id === form.dataset.scheduleForm);
       if (!schedule) return;
+      const previousScreenId = schedule.screenId;
+      const previousPlaylistId = schedule.playlistId;
 
       const formData = new FormData(form);
       schedule.name = String(formData.get("name") || "").trim();
@@ -1435,6 +1476,10 @@ function bindScheduleActions() {
       schedule.days = String(formData.get("days") || "").trim();
       schedule.start = String(formData.get("start") || "");
       schedule.end = String(formData.get("end") || "");
+      publishContentUpdate({
+        screenIds: [previousScreenId, schedule.screenId],
+        playlistIds: [previousPlaylistId, schedule.playlistId],
+      });
 
       await saveState();
       renderSchedule();
@@ -1443,7 +1488,11 @@ function bindScheduleActions() {
 
   document.querySelectorAll("[data-delete-schedule]").forEach((button) => {
     button.addEventListener("click", async () => {
+      const schedule = state.schedules.find((item) => item.id === button.dataset.deleteSchedule);
       state.schedules = state.schedules.filter((schedule) => schedule.id !== button.dataset.deleteSchedule);
+      if (schedule) {
+        publishContentUpdate({ screenIds: [schedule.screenId], playlistIds: [schedule.playlistId] });
+      }
       await saveState();
       renderSchedule();
     });
@@ -1473,15 +1522,22 @@ async function renderPlayer(screenId) {
     cursor: 0,
     currentAssetId: null,
     lastHeartbeatAt: Date.now(),
+    playVersion: 0,
+    playNext: null,
     refreshToken: screen.refreshToken || "",
     queueSignature: "",
   };
 
   const playNext = async () => {
+    if (!playerSession || playerSession.screenId !== screenId) return;
+    const playVersion = ++playerSession.playVersion;
+    const isCurrentPlay = () => playerSession?.screenId === screenId && playerSession.playVersion === playVersion;
     const queue = playerQueueForScreen(screenId, state);
     if (!queue.assets.length) {
       showPlayerMessage(queue.screen?.name || "SignalDeck", "No playable playlist is assigned.");
-      playerTimer = setTimeout(playNext, PLAYER_SYNC_INTERVAL_MS);
+      playerTimer = setTimeout(() => {
+        if (isCurrentPlay()) playNext();
+      }, PLAYER_SYNC_INTERVAL_MS);
       return;
     }
 
@@ -1494,8 +1550,16 @@ async function renderPlayer(screenId) {
     const asset = queue.assets[playerSession.cursor % queue.assets.length];
     playerSession.currentAssetId = asset.id;
     playerSession.cursor += 1;
-    await showAsset(asset, playNext);
+    await showAsset(
+      asset,
+      () => {
+        if (isCurrentPlay()) playNext();
+      },
+      true,
+      isCurrentPlay,
+    );
   };
+  playerSession.playNext = playNext;
 
   playNext();
   scheduleBlankRecoveryCheck(screenId);
@@ -1521,11 +1585,20 @@ function schedulePlayerRefresh(screenId) {
       return;
     }
 
+    const nextQueueSignature = playerPlaybackSignature(screenId, state);
+    const shouldApplyContentUpdate =
+      playerSession?.queueSignature && nextQueueSignature !== playerSession.queueSignature;
     const shouldSaveHeartbeat =
       playerSession && Date.now() - playerSession.lastHeartbeatAt >= PLAYER_HEARTBEAT_INTERVAL_MS;
     markScreenOnline(screenId, { persist: shouldSaveHeartbeat });
     if (shouldSaveHeartbeat && playerSession) {
       playerSession.lastHeartbeatAt = Date.now();
+    }
+    if (shouldApplyContentUpdate && playerSession) {
+      clearTimeout(playerTimer);
+      playerSession.cursor = 0;
+      playerSession.currentAssetId = null;
+      playerSession.playNext?.();
     }
     schedulePlayerRefresh(screenId);
   }, PLAYER_SYNC_INTERVAL_MS);
@@ -1553,11 +1626,12 @@ function markScreenOnline(screenId, { persist = true } = {}) {
   if (persist) saveState();
 }
 
-async function showAsset(asset, done, shouldRotate = true) {
+async function showAsset(asset, done, shouldRotate = true, isCurrent = () => true) {
   const stage = document.querySelector("#playerStage");
   if (!stage) return;
 
   if (asset.type === "demo") {
+    if (!isCurrent()) return;
     replaceActivePlayerObjectUrl(null);
     stage.dataset.loading = "false";
     stage.innerHTML = `
@@ -1592,6 +1666,7 @@ async function showAsset(asset, done, shouldRotate = true) {
 
     try {
       await waitForVideoReady(video);
+      if (!isCurrent()) return;
       replaceActivePlayerObjectUrl(src);
       stage.dataset.loading = "false";
       stage.replaceChildren(video);
@@ -1636,6 +1711,7 @@ async function showAsset(asset, done, shouldRotate = true) {
 
     try {
       await waitForImageReady(image);
+      if (!isCurrent()) return;
       replaceActivePlayerObjectUrl(src);
       stage.dataset.loading = "false";
       stage.replaceChildren(image);
@@ -1765,6 +1841,7 @@ function playerPlaybackSignature(screenId, snapshot, date = new Date()) {
   return JSON.stringify({
     screenId,
     playlistId: playlist.id,
+    contentToken: screen.contentToken || snapshot.contentToken || "",
     assetIds: playlist.assetIds,
     assets,
   });
