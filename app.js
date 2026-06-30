@@ -12,6 +12,7 @@ const SUPABASE_STATE_TABLE = "signaldeck_state";
 const SUPABASE_STATE_ID = "default";
 const SLIDE_DURATION_SECONDS = 120;
 const PLAYER_SYNC_INTERVAL_MS = 10000;
+const MEDIA_READY_TIMEOUT_MS = 30000;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
 const ALL_DAY_INDEXES = [0, 1, 2, 3, 4, 5, 6];
@@ -110,6 +111,7 @@ let playerTimer = null;
 let playerRefreshTimer = null;
 let playerClockTimer = null;
 let playerSession = null;
+let activePlayerObjectUrl = null;
 let saveQueue = Promise.resolve();
 let cloudStorageAvailable = false;
 let supabaseClient = null;
@@ -503,6 +505,14 @@ async function deleteBlob(id) {
 function clearObjectUrls() {
   currentObjectUrls.forEach((url) => URL.revokeObjectURL(url));
   currentObjectUrls = [];
+  activePlayerObjectUrl = null;
+}
+
+function replaceActivePlayerObjectUrl(url) {
+  if (activePlayerObjectUrl && activePlayerObjectUrl !== url) {
+    URL.revokeObjectURL(activePlayerObjectUrl);
+  }
+  activePlayerObjectUrl = url && url.startsWith("blob:") ? url : null;
 }
 
 async function assetSrc(asset) {
@@ -1462,8 +1472,8 @@ async function showAsset(asset, done, shouldRotate = true) {
   const stage = document.querySelector("#playerStage");
   if (!stage) return;
 
-  clearObjectUrls();
   if (asset.type === "demo") {
+    replaceActivePlayerObjectUrl(null);
     stage.innerHTML = `
       <div class="demo-slide">
         <div>
@@ -1479,26 +1489,86 @@ async function showAsset(asset, done, shouldRotate = true) {
 
   const src = await assetSrc(asset);
   if (!src) {
-    stage.innerHTML = `<div class="demo-slide"><div><h1>Missing Media</h1><p>${asset.name}</p></div></div>`;
-    playerTimer = setTimeout(done, 5000);
+    playerTimer = setTimeout(done, 1000);
     return;
   }
 
   if (asset.type.startsWith("video/")) {
-    stage.innerHTML = `<video src="${src}" autoplay muted playsinline ${shouldRotate ? "" : "loop"}></video>`;
-    const video = stage.querySelector("video");
-    video.onended = shouldRotate ? done : null;
-    video.onerror = () => {
-      if (shouldRotate) {
-        playerTimer = setTimeout(done, 5000);
-      }
-    };
+    const video = document.createElement("video");
+    video.src = src;
+    video.muted = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    video.preload = "auto";
+    if (!shouldRotate) video.loop = true;
+
+    try {
+      await waitForVideoReady(video);
+      replaceActivePlayerObjectUrl(src);
+      stage.replaceChildren(video);
+      video.onended = shouldRotate ? done : null;
+      video.onerror = () => {
+        if (shouldRotate) playerTimer = setTimeout(done, 1000);
+      };
+      await video.play();
+    } catch {
+      if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+      if (shouldRotate) playerTimer = setTimeout(done, 1000);
+    }
   } else {
-    stage.innerHTML = `<img src="${src}" alt="${asset.name}" />`;
-    if (shouldRotate) {
-      playerTimer = setTimeout(done, assetDuration(asset) * 1000);
+    const image = new Image();
+    image.alt = asset.name;
+    image.src = src;
+
+    try {
+      await waitForImageReady(image);
+      replaceActivePlayerObjectUrl(src);
+      stage.replaceChildren(image);
+      if (shouldRotate) playerTimer = setTimeout(done, assetDuration(asset) * 1000);
+    } catch {
+      if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+      if (shouldRotate) playerTimer = setTimeout(done, 1000);
     }
   }
+}
+
+function waitForImageReady(image) {
+  if (image.complete && image.naturalWidth > 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Image took too long to load.")), MEDIA_READY_TIMEOUT_MS);
+    image.onload = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+    image.onerror = () => {
+      clearTimeout(timeout);
+      reject(new Error("Image failed to load."));
+    };
+  });
+}
+
+function waitForVideoReady(video) {
+  if (video.readyState >= 2) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Video took too long to load.")), MEDIA_READY_TIMEOUT_MS);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      video.onloadeddata = null;
+      video.oncanplay = null;
+      video.onerror = null;
+    };
+    const ready = () => {
+      cleanup();
+      resolve();
+    };
+    video.onloadeddata = ready;
+    video.oncanplay = ready;
+    video.onerror = () => {
+      cleanup();
+      reject(new Error("Video failed to load."));
+    };
+    video.load();
+  });
 }
 
 function showPlayerMessage(title, message) {
