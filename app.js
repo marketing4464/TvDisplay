@@ -570,6 +570,7 @@ function shell(title, subtitle, body, actions = "") {
               <strong>${syncStatus.label}</strong>
               <small>${syncStatus.detail}</small>
             </span>
+            <button class="btn ghost" data-deploy-media>Deploy media updates</button>
             ${actions}
           </div>
         </header>
@@ -581,6 +582,7 @@ function shell(title, subtitle, body, actions = "") {
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => setView(button.dataset.view));
   });
+  bindDeployMediaActions();
 }
 
 function render() {
@@ -706,6 +708,34 @@ function currentScheduleRows(activeSchedules) {
 function bindJumps() {
   document.querySelectorAll("[data-jump]").forEach((button) => {
     button.addEventListener("click", () => setView(button.dataset.jump));
+  });
+}
+
+function requestScreenRefresh(screen, now = Date.now()) {
+  screen.refreshToken = `${now}-${uid("refresh")}`;
+  screen.refreshRequestedAt = now;
+}
+
+async function deployMediaUpdates(button = null) {
+  const now = Date.now();
+  state.deployToken = `${now}-${uid("deploy")}`;
+  state.deployRequestedAt = now;
+  state.screens.forEach((screen) => requestScreenRefresh(screen, now));
+  await saveState();
+
+  if (button) {
+    button.textContent = "Deploy sent";
+    button.disabled = true;
+    setTimeout(() => {
+      button.textContent = "Deploy media updates";
+      button.disabled = false;
+    }, 1600);
+  }
+}
+
+function bindDeployMediaActions() {
+  document.querySelectorAll("[data-deploy-media]").forEach((button) => {
+    button.addEventListener("click", () => deployMediaUpdates(button));
   });
 }
 
@@ -1198,6 +1228,7 @@ function screenManagerRows() {
           </div>
           <div class="actions">
             <a class="btn small ghost" href="${playerUrl(screen.id)}">Open player</a>
+            <button class="btn small ghost" data-refresh-screen="${screen.id}">Refresh player</button>
             <button class="btn small ghost" data-copy="${screen.id}">Copy URL</button>
             <button class="btn small danger" data-delete-screen="${screen.id}">Delete</button>
           </div>
@@ -1221,6 +1252,15 @@ function bindScreenActions() {
       await navigator.clipboard.writeText(playerUrl(button.dataset.copy));
       button.textContent = "Copied";
       setTimeout(() => (button.textContent = "Copy URL"), 1100);
+    });
+  });
+  document.querySelectorAll("[data-refresh-screen]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const screen = state.screens.find((item) => item.id === button.dataset.refreshScreen);
+      if (!screen) return;
+      requestScreenRefresh(screen);
+      await saveState();
+      renderScreens();
     });
   });
   document.querySelectorAll("[data-delete-screen]").forEach((button) => {
@@ -1415,6 +1455,7 @@ async function renderPlayer(screenId) {
     screenId,
     cursor: 0,
     currentAssetId: null,
+    refreshToken: screen.refreshToken || "",
     queueSignature: "",
   };
 
@@ -1449,8 +1490,15 @@ function schedulePlayerRefresh(screenId) {
     state = nextState;
     activeView = state.activeView || activeView;
 
-    if (!state.screens.some((screen) => screen.id === screenId)) {
+    const refreshedScreen = state.screens.find((screen) => screen.id === screenId);
+    if (!refreshedScreen) {
       render();
+      return;
+    }
+
+    const nextRefreshToken = refreshedScreen.refreshToken || "";
+    if (nextRefreshToken && nextRefreshToken !== playerSession?.refreshToken) {
+      window.location.reload();
       return;
     }
 
@@ -1502,16 +1550,43 @@ async function showAsset(asset, done, shouldRotate = true) {
     video.preload = "auto";
     if (!shouldRotate) video.loop = true;
 
+    let cleanupVideoWatchdogs = () => {};
+
     try {
       await waitForVideoReady(video);
       replaceActivePlayerObjectUrl(src);
       stage.replaceChildren(video);
-      video.onended = shouldRotate ? done : null;
+
+      if (shouldRotate) {
+        let isFinished = false;
+        const maxDurationSeconds = Math.max(assetDuration(asset), Math.ceil(video.duration || 0), 1);
+        const maxTimer = setTimeout(finishVideo, (maxDurationSeconds + 5) * 1000);
+        const progressTimer = setTimeout(() => {
+          if (video.currentTime < 0.1 && !video.ended) finishVideo();
+        }, 8000);
+
+        cleanupVideoWatchdogs = () => {
+          clearTimeout(maxTimer);
+          clearTimeout(progressTimer);
+        };
+
+        function finishVideo() {
+          if (isFinished) return;
+          isFinished = true;
+          cleanupVideoWatchdogs();
+          done();
+        }
+
+        video.onended = finishVideo;
+      }
+
       video.onerror = () => {
+        cleanupVideoWatchdogs();
         if (shouldRotate) playerTimer = setTimeout(done, 1000);
       };
       await video.play();
     } catch {
+      cleanupVideoWatchdogs();
       if (src.startsWith("blob:")) URL.revokeObjectURL(src);
       if (shouldRotate) playerTimer = setTimeout(done, 1000);
     }
