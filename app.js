@@ -16,6 +16,7 @@ const SLIDE_DURATION_SECONDS = 120;
 const PLAYER_SYNC_INTERVAL_MS = 10000;
 const PLAYER_HEARTBEAT_INTERVAL_MS = 60000;
 const PLAYER_BLANK_RECOVERY_MS = 45000;
+const PLAYER_DAILY_ROLLOVER_BUFFER_MS = 90000;
 const MEDIA_READY_TIMEOUT_MS = 30000;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
@@ -116,6 +117,7 @@ let playerTimer = null;
 let playerRefreshTimer = null;
 let playerClockTimer = null;
 let playerBlankRecoveryTimer = null;
+let playerDailyRolloverTimer = null;
 let playerSession = null;
 let activePlayerObjectUrl = null;
 let saveQueue = Promise.resolve();
@@ -133,6 +135,7 @@ const scheduleDateFormatter = new Intl.DateTimeFormat("en-US", {
   weekday: "short",
   hour: "2-digit",
   minute: "2-digit",
+  second: "2-digit",
   hourCycle: "h23",
 });
 
@@ -612,6 +615,7 @@ function render() {
   clearTimeout(playerTimer);
   clearTimeout(playerRefreshTimer);
   clearTimeout(playerBlankRecoveryTimer);
+  clearTimeout(playerDailyRolloverTimer);
   clearInterval(playerClockTimer);
   clearObjectUrls();
 
@@ -1571,6 +1575,7 @@ async function renderPlayer(screenId) {
   playerSession.playNext = playNext;
 
   playNext();
+  scheduleDailyRolloverReload(screenId);
   scheduleBlankRecoveryCheck(screenId);
   schedulePlayerRefresh(screenId);
 }
@@ -1590,7 +1595,7 @@ function schedulePlayerRefresh(screenId) {
 
     const nextRefreshToken = refreshedScreen.refreshToken || "";
     if (nextRefreshToken && nextRefreshToken !== playerSession?.refreshToken) {
-      window.location.reload();
+      reloadPlayerWindow("remote");
       return;
     }
 
@@ -1619,11 +1624,36 @@ function scheduleBlankRecoveryCheck(screenId) {
     const stage = document.querySelector("#playerStage");
     const hasRenderedMedia = stage?.querySelector("img, video") || stage?.dataset.loading !== "true";
     if (!hasRenderedMedia && window.location.hash === `#/player/${screenId}`) {
-      window.location.reload();
+      reloadPlayerWindow("blank");
       return;
     }
     scheduleBlankRecoveryCheck(screenId);
   }, PLAYER_BLANK_RECOVERY_MS);
+}
+
+function scheduleDailyRolloverReload(screenId) {
+  clearTimeout(playerDailyRolloverTimer);
+  playerDailyRolloverTimer = setTimeout(() => {
+    if (window.location.hash === `#/player/${screenId}`) {
+      reloadPlayerWindow("daily");
+      return;
+    }
+    scheduleDailyRolloverReload(screenId);
+  }, nextScheduleDayRolloverDelay());
+}
+
+function nextScheduleDayRolloverDelay(date = new Date()) {
+  const { minutes, seconds } = scheduleDateParts(date);
+  const elapsedSeconds = minutes * 60 + seconds;
+  const daySeconds = 24 * 60 * 60;
+  const secondsUntilNextDay = elapsedSeconds >= daySeconds ? daySeconds : daySeconds - elapsedSeconds;
+  return secondsUntilNextDay * 1000 + PLAYER_DAILY_ROLLOVER_BUFFER_MS;
+}
+
+function reloadPlayerWindow(reason) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("playerReload", `${Date.now()}-${reason}`);
+  window.location.replace(url.toString());
 }
 
 function markScreenOnline(screenId, { persist = true } = {}) {
@@ -1908,9 +1938,11 @@ function scheduleDateParts(date) {
   const dayIndex = dayIndexFromToken(parts.weekday);
   const hours = Number(parts.hour);
   const minutes = Number(parts.minute);
+  const seconds = Number(parts.second || 0);
   return {
     dayIndex: dayIndex ?? date.getDay(),
     minutes: hours * 60 + minutes,
+    seconds,
   };
 }
 
