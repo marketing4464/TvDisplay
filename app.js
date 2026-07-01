@@ -20,6 +20,7 @@ const MEDIA_READY_TIMEOUT_MS = 30000;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
 const ALL_DAY_INDEXES = [0, 1, 2, 3, 4, 5, 6];
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const DAY_ALIASES = {
   sun: 0,
   sunday: 0,
@@ -1792,6 +1793,9 @@ function activeScheduleForScreen(screen, date = new Date()) {
 }
 
 function activePlaylistForScreenInState(snapshot, screen, date = new Date()) {
+  const dailyPricingPlaylist = entertainmentPricingPlaylistForDate(snapshot, screen, date);
+  if (dailyPricingPlaylist) return dailyPricingPlaylist;
+
   const scheduled = activeScheduleForScreenInState(snapshot, screen, date);
   if (scheduled) return snapshot.playlists.find((playlist) => playlist.id === scheduled.playlistId);
   return snapshot.playlists.find((playlist) => playlist.id === screen.playlistId);
@@ -1799,6 +1803,23 @@ function activePlaylistForScreenInState(snapshot, screen, date = new Date()) {
 
 function activeScheduleForScreenInState(snapshot, screen, date = new Date()) {
   return snapshot.schedules.find((schedule) => schedule.screenId === screen.id && scheduleMatches(schedule, date));
+}
+
+function entertainmentPricingPlaylistForDate(snapshot, screen, date) {
+  if (!isEntertainmentPricingScreen(screen)) return null;
+
+  const { dayIndex } = scheduleDateParts(date);
+  const dayName = DAY_NAMES[dayIndex];
+  if (!dayName) return null;
+
+  return (
+    snapshot.playlists.find((playlist) => playlist.name?.toLowerCase() === `${dayName.toLowerCase()} pricing`) ||
+    null
+  );
+}
+
+function isEntertainmentPricingScreen(screen) {
+  return /entertainment pricing/i.test(`${screen?.name || ""} ${screen?.location || ""} ${screen?.notes || ""}`);
 }
 
 function playerQueueForScreen(screenId, snapshot, date = new Date()) {
