@@ -11,6 +11,7 @@ const SUPABASE_CLIENT_URL = "https://esm.sh/@supabase/supabase-js@2.51.0?bundle"
 const SUPABASE_BUCKET = "signaldeck-media";
 const SUPABASE_STATE_TABLE = "signaldeck_state";
 const SUPABASE_STATE_ID = "default";
+const SCHEDULE_TIME_ZONE = "America/New_York";
 const SLIDE_DURATION_SECONDS = 120;
 const PLAYER_SYNC_INTERVAL_MS = 10000;
 const PLAYER_HEARTBEAT_INTERVAL_MS = 60000;
@@ -126,6 +127,13 @@ let syncStatus = {
 };
 
 const app = document.querySelector("#app");
+const scheduleDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: SCHEDULE_TIME_ZONE,
+  weekday: "short",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
 
 function redirectToCanonicalHost() {
   if (!window.location.hostname.endsWith(".vercel.app")) return false;
@@ -1854,24 +1862,35 @@ function scheduleMatches(schedule, date = new Date()) {
 function scheduleMatchesAt(schedule, date) {
   const start = timeToMinutes(schedule.start);
   const end = timeToMinutes(schedule.end);
-  const current = date.getHours() * 60 + date.getMinutes();
+  const { dayIndex, minutes: current } = scheduleDateParts(date);
 
   if (start === null || end === null) return false;
-  if (start === end) return scheduleRunsOnDay(schedule, date.getDay());
+  if (start === end) return scheduleRunsOnDay(schedule, dayIndex);
 
   if (end > start) {
-    return current >= start && current < end && scheduleRunsOnDay(schedule, date.getDay());
+    return current >= start && current < end && scheduleRunsOnDay(schedule, dayIndex);
   }
 
   if (current >= start) {
-    return scheduleRunsOnDay(schedule, date.getDay());
+    return scheduleRunsOnDay(schedule, dayIndex);
   }
 
   if (current < end) {
-    return scheduleRunsOnDay(schedule, previousDayIndex(date.getDay()));
+    return scheduleRunsOnDay(schedule, previousDayIndex(dayIndex));
   }
 
   return false;
+}
+
+function scheduleDateParts(date) {
+  const parts = Object.fromEntries(scheduleDateFormatter.formatToParts(date).map((part) => [part.type, part.value]));
+  const dayIndex = dayIndexFromToken(parts.weekday);
+  const hours = Number(parts.hour);
+  const minutes = Number(parts.minute);
+  return {
+    dayIndex: dayIndex ?? date.getDay(),
+    minutes: hours * 60 + minutes,
+  };
 }
 
 function scheduleRunsOnDay(schedule, dayIndex) {
