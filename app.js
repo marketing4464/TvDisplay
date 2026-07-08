@@ -18,6 +18,7 @@ const PLAYER_HEARTBEAT_INTERVAL_MS = 60000;
 const PLAYER_BLANK_RECOVERY_MS = 45000;
 const PLAYER_DAILY_ROLLOVER_BUFFER_MS = 90000;
 const MEDIA_READY_TIMEOUT_MS = 30000;
+const BRIGHTSIGN_OUTPUT_COUNT = 4;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
 const ALL_DAY_INDEXES = [0, 1, 2, 3, 4, 5, 6];
@@ -119,6 +120,9 @@ let playerClockTimer = null;
 let playerBlankRecoveryTimer = null;
 let playerDailyRolloverTimer = null;
 let playerSession = null;
+let brightsignSessions = [];
+let brightsignRefreshTimer = null;
+let brightsignLastHeartbeatAt = 0;
 let activePlayerObjectUrl = null;
 let saveQueue = Promise.resolve();
 let cloudStorageAvailable = false;
@@ -481,6 +485,13 @@ function playerUrl(screenId) {
   return url.toString();
 }
 
+function brightsignUrl(screenIds = state.screens.slice(0, BRIGHTSIGN_OUTPUT_COUNT).map((screen) => screen.id)) {
+  const url = new URL(window.location.href);
+  const paddedIds = [...screenIds].slice(0, BRIGHTSIGN_OUTPUT_COUNT);
+  url.hash = `#/brightsign/${paddedIds.map(encodeURIComponent).join(",")}`;
+  return url.toString();
+}
+
 function setView(view) {
   activeView = view;
   saveState();
@@ -532,6 +543,17 @@ function clearObjectUrls() {
   currentObjectUrls.forEach((url) => URL.revokeObjectURL(url));
   currentObjectUrls = [];
   activePlayerObjectUrl = null;
+}
+
+function clearBrightSignSessions() {
+  brightsignSessions.forEach((session) => {
+    clearTimeout(session.timer);
+    session.video?.pause?.();
+    session.video = null;
+  });
+  brightsignSessions = [];
+  brightsignLastHeartbeatAt = 0;
+  clearTimeout(brightsignRefreshTimer);
 }
 
 function replaceActivePlayerObjectUrl(url) {
@@ -617,7 +639,14 @@ function render() {
   clearTimeout(playerBlankRecoveryTimer);
   clearTimeout(playerDailyRolloverTimer);
   clearInterval(playerClockTimer);
+  clearBrightSignSessions();
   clearObjectUrls();
+
+  const brightsignMatch = window.location.hash.match(/^#\/brightsign\/?([^?]*)/);
+  if (brightsignMatch) {
+    renderBrightSignPlayer(parseBrightSignScreenIds(brightsignMatch[1] || ""));
+    return;
+  }
 
   const playerMatch = window.location.hash.match(/^#\/player\/(.+)$/);
   if (playerMatch) {
@@ -1239,8 +1268,15 @@ function renderScreens() {
             <h3>Screens</h3>
             <p>Open a player link on the matching mini PC</p>
           </div>
+          <div class="actions">
+            <a class="btn small ghost" href="${brightsignUrl()}">Open XC5 player</a>
+            <button class="btn small ghost" data-copy-brightsign>Copy XC5 URL</button>
+          </div>
         </div>
         <div class="panel-body">
+          <div class="empty compact">
+            BrightSign XC4055 uses the first four screens below as HDMI outputs 1-4.
+          </div>
           ${screenManagerRows()}
         </div>
       </section>
@@ -1317,6 +1353,12 @@ function bindScreenActions() {
       button.textContent = "Copied";
       setTimeout(() => (button.textContent = "Copy URL"), 1100);
     });
+  });
+  document.querySelector("[data-copy-brightsign]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    await navigator.clipboard.writeText(brightsignUrl());
+    button.textContent = "Copied";
+    setTimeout(() => (button.textContent = "Copy XC5 URL"), 1100);
   });
   document.querySelectorAll("[data-refresh-screen]").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -1510,6 +1552,183 @@ function bindScheduleActions() {
       renderSchedule();
     });
   });
+}
+
+function parseBrightSignScreenIds(value) {
+  return String(value || "")
+    .split(",")
+    .map((id) => decodeURIComponent(id).trim())
+    .filter(Boolean)
+    .slice(0, BRIGHTSIGN_OUTPUT_COUNT);
+}
+
+async function renderBrightSignPlayer(screenIds = []) {
+  const outputScreenIds = [...screenIds, ...state.screens.map((screen) => screen.id)]
+    .filter((id, index, all) => id && all.indexOf(id) === index)
+    .slice(0, BRIGHTSIGN_OUTPUT_COUNT);
+
+  app.innerHTML = `
+    <section class="brightsign-player">
+      ${Array.from({ length: BRIGHTSIGN_OUTPUT_COUNT }, (_, index) => {
+        const screenId = outputScreenIds[index] || "";
+        return `
+          <div class="brightsign-output" data-brightsign-output="${index}" data-screen-id="${screenId}">
+            <div class="brightsign-stage" data-loading="true"></div>
+          </div>`;
+      }).join("")}
+    </section>
+  `;
+
+  brightsignSessions = outputScreenIds.map((screenId, index) => {
+    const session = {
+      screenId,
+      outputIndex: index,
+      cursor: 0,
+      currentAssetId: null,
+      playVersion: 0,
+      queueSignature: "",
+      timer: null,
+      video: null,
+      stage: document.querySelector(`[data-brightsign-output="${index}"] .brightsign-stage`),
+    };
+    startBrightSignOutput(session);
+    return session;
+  });
+
+  scheduleBrightSignRefresh(outputScreenIds);
+}
+
+async function startBrightSignOutput(session) {
+  if (!session?.stage) return;
+
+  const playVersion = ++session.playVersion;
+  const isCurrent = () => brightsignSessions.includes(session) && session.playVersion === playVersion;
+  const queue = playerQueueForScreen(session.screenId, state);
+
+  if (!queue.assets.length) {
+    showBrightSignMessage(session.stage, queue.screen?.name || `Output ${session.outputIndex + 1}`, "No playlist assigned");
+    session.timer = setTimeout(() => {
+      if (isCurrent()) startBrightSignOutput(session);
+    }, PLAYER_SYNC_INTERVAL_MS);
+    return;
+  }
+
+  if (session.queueSignature !== queue.signature) {
+    const currentIndex = queue.assets.findIndex((asset) => asset.id === session.currentAssetId);
+    session.cursor = currentIndex >= 0 ? currentIndex + 1 : 0;
+    session.queueSignature = queue.signature;
+  }
+
+  const shouldRotate = queue.assets.length > 1;
+  const asset = queue.assets[session.cursor % queue.assets.length];
+  session.currentAssetId = asset.id;
+  session.cursor += 1;
+  await showAssetInStage(session.stage, asset, () => {
+    if (isCurrent()) startBrightSignOutput(session);
+  }, shouldRotate, isCurrent, session);
+}
+
+async function showAssetInStage(stage, asset, done, shouldRotate, isCurrent, session) {
+  clearTimeout(session.timer);
+  session.video?.pause?.();
+  session.video = null;
+
+  if (asset.type === "demo") {
+    if (!isCurrent()) return;
+    stage.dataset.loading = "false";
+    stage.innerHTML = `
+      <div class="demo-slide">
+        <div>
+          <h1>${escapeHtml(asset.headline || asset.name)}</h1>
+          <p>${escapeHtml(asset.subhead || "Generated signage slide")}</p>
+        </div>
+      </div>`;
+    if (shouldRotate) session.timer = setTimeout(done, assetDuration(asset) * 1000);
+    return;
+  }
+
+  const src = await assetSrc(asset);
+  if (!src) {
+    session.timer = setTimeout(done, 1000);
+    return;
+  }
+
+  if (asset.type.startsWith("video/")) {
+    const video = document.createElement("video");
+    video.src = src;
+    video.muted = true;
+    video.playsInline = true;
+    video.autoplay = true;
+    video.preload = "auto";
+    if (!shouldRotate) video.loop = true;
+
+    try {
+      await waitForVideoReady(video);
+      if (!isCurrent()) return;
+      stage.dataset.loading = "false";
+      stage.replaceChildren(video);
+      session.video = video;
+
+      if (shouldRotate) {
+        const maxDurationSeconds = Math.max(assetDuration(asset), Math.ceil(video.duration || 0), 1);
+        session.timer = setTimeout(done, (maxDurationSeconds + 5) * 1000);
+        video.onended = () => {
+          clearTimeout(session.timer);
+          done();
+        };
+      }
+      await video.play();
+    } catch {
+      if (shouldRotate) session.timer = setTimeout(done, 1000);
+    }
+    return;
+  }
+
+  const image = new Image();
+  image.alt = asset.name;
+  image.src = src;
+
+  try {
+    await waitForImageReady(image);
+    if (!isCurrent()) return;
+    stage.dataset.loading = "false";
+    stage.replaceChildren(image);
+    if (shouldRotate) session.timer = setTimeout(done, assetDuration(asset) * 1000);
+  } catch {
+    if (shouldRotate) session.timer = setTimeout(done, 1000);
+  }
+}
+
+function showBrightSignMessage(stage, title, message) {
+  stage.dataset.loading = "false";
+  stage.innerHTML = `
+    <div class="demo-slide">
+      <div>
+        <h1>${escapeHtml(title)}</h1>
+        <p>${escapeHtml(message)}</p>
+      </div>
+    </div>`;
+}
+
+function scheduleBrightSignRefresh(screenIds) {
+  brightsignRefreshTimer = setTimeout(async () => {
+    state = await loadState();
+    const shouldSaveHeartbeat = Date.now() - brightsignLastHeartbeatAt >= PLAYER_HEARTBEAT_INTERVAL_MS;
+    if (shouldSaveHeartbeat) {
+      screenIds.forEach((screenId) => markScreenOnline(screenId, { persist: false }));
+      brightsignLastHeartbeatAt = Date.now();
+    }
+    brightsignSessions.forEach((session) => {
+      const nextSignature = playerPlaybackSignature(session.screenId, state);
+      if (nextSignature !== session.queueSignature) {
+        session.cursor = 0;
+        session.currentAssetId = null;
+        startBrightSignOutput(session);
+      }
+    });
+    if (shouldSaveHeartbeat) saveState();
+    scheduleBrightSignRefresh(screenIds);
+  }, PLAYER_SYNC_INTERVAL_MS);
 }
 
 async function renderPlayer(screenId) {

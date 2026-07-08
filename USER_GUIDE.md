@@ -106,6 +106,21 @@ To change what an existing screen plays, use the playlist selector in that scree
 
 The player page is the page you run full-screen on the signage computer.
 
+## Use With BrightSign XC4055
+
+SignalDeck includes an XC5 player URL for a BrightSign XC4055 with four HDMI outputs.
+
+1. Click `Screens`.
+2. Put the four channels you want on the BrightSign in the first four screen rows.
+3. Click `Copy XC5 URL`.
+4. In BrightSign Author, create an HTML5/web presentation that opens that URL.
+5. Configure the XC4055 output layout as a 2x2 multi-output canvas.
+6. Wire each BrightSign HDMI output into a Just Add Power transmitter.
+
+The XC5 URL renders the first four SignalDeck screens as four separate zones. Each zone follows its assigned playlist and schedule.
+
+For more than four unique channels, use another BrightSign player or another mini PC output for the remaining channels.
+
 ## Use With Just Add Power
 
 For each channel:
@@ -174,4 +189,4 @@ If a TV is showing the wrong content, check:
 - There is no login/user management yet.
 - The current Supabase setup allows public read/write access so player computers can sync without signing in.
 - Player screens apply playlist changes after the current image or video finishes, so playback is not interrupted.
-- Each mini PC/channel must be configured separately.
+- A normal mini PC/channel must be configured separately. A BrightSign XC4055 can run up to four SignalDeck screen zones when configured as a multi-output canvas.
