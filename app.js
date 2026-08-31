@@ -19,6 +19,15 @@ const PLAYER_BLANK_RECOVERY_MS = 45000;
 const PLAYER_DAILY_ROLLOVER_BUFFER_MS = 90000;
 const MEDIA_READY_TIMEOUT_MS = 30000;
 const BRIGHTSIGN_OUTPUT_COUNT = 4;
+const EVENT_COUNTDOWN = {
+  title: "OPE Murder Mystery",
+  subtitle: "A Killer Halloween!",
+  targetAt: "2026-10-15T19:00:00-04:00",
+  dateLabel: "October 15 at 7 PM",
+};
+const EVENT_COUNTDOWN_INITIAL_DELAY_MS = 5000;
+const EVENT_COUNTDOWN_VISIBLE_MS = 15000;
+const EVENT_COUNTDOWN_REPEAT_MS = 5 * 60 * 1000;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
 const ALL_DAY_INDEXES = [0, 1, 2, 3, 4, 5, 6];
@@ -123,6 +132,10 @@ let playerSession = null;
 let brightsignSessions = [];
 let brightsignRefreshTimer = null;
 let brightsignLastHeartbeatAt = 0;
+let brightsignDeployToken = "";
+let eventCountdownShowTimer = null;
+let eventCountdownHideTimer = null;
+let eventCountdownTickTimer = null;
 let activePlayerObjectUrl = null;
 let saveQueue = Promise.resolve();
 let cloudStorageAvailable = false;
@@ -553,7 +566,17 @@ function clearBrightSignSessions() {
   });
   brightsignSessions = [];
   brightsignLastHeartbeatAt = 0;
+  brightsignDeployToken = "";
   clearTimeout(brightsignRefreshTimer);
+}
+
+function clearEventCountdown() {
+  clearTimeout(eventCountdownShowTimer);
+  clearTimeout(eventCountdownHideTimer);
+  clearInterval(eventCountdownTickTimer);
+  eventCountdownShowTimer = null;
+  eventCountdownHideTimer = null;
+  eventCountdownTickTimer = null;
 }
 
 function replaceActivePlayerObjectUrl(url) {
@@ -640,6 +663,7 @@ function render() {
   clearTimeout(playerDailyRolloverTimer);
   clearInterval(playerClockTimer);
   clearBrightSignSessions();
+  clearEventCountdown();
   clearObjectUrls();
 
   const brightsignMatch = window.location.hash.match(/^#\/brightsign\/?([^?]*)/);
@@ -1562,6 +1586,92 @@ function parseBrightSignScreenIds(value) {
     .slice(0, BRIGHTSIGN_OUTPUT_COUNT);
 }
 
+function eventCountdownMarkup({ compact = false } = {}) {
+  return `
+    <aside class="event-countdown${compact ? " is-compact" : ""}" data-event-countdown aria-hidden="true">
+      <div class="event-countdown-copy">
+        <p class="event-countdown-kicker">${escapeHtml(EVENT_COUNTDOWN.dateLabel)}</p>
+        <h2>${escapeHtml(EVENT_COUNTDOWN.title)}</h2>
+        <p class="event-countdown-subtitle">${escapeHtml(EVENT_COUNTDOWN.subtitle)}</p>
+      </div>
+      <div class="event-countdown-timer" data-event-countdown-value></div>
+    </aside>`;
+}
+
+function startEventCountdown() {
+  clearEventCountdown();
+
+  const targetAt = new Date(EVENT_COUNTDOWN.targetAt).getTime();
+  const overlays = [...document.querySelectorAll("[data-event-countdown]")];
+  if (!Number.isFinite(targetAt) || targetAt <= Date.now() || !overlays.length) return;
+
+  const hide = () => {
+    overlays.forEach((overlay) => {
+      overlay.classList.remove("is-visible");
+      overlay.setAttribute("aria-hidden", "true");
+    });
+  };
+
+  const show = () => {
+    if (targetAt <= Date.now()) {
+      hide();
+      clearEventCountdown();
+      return;
+    }
+
+    updateEventCountdown(targetAt);
+    overlays.forEach((overlay) => {
+      overlay.classList.add("is-visible");
+      overlay.setAttribute("aria-hidden", "false");
+    });
+
+    eventCountdownHideTimer = setTimeout(() => {
+      hide();
+      eventCountdownShowTimer = setTimeout(
+        show,
+        Math.max(1000, EVENT_COUNTDOWN_REPEAT_MS - EVENT_COUNTDOWN_VISIBLE_MS),
+      );
+    }, EVENT_COUNTDOWN_VISIBLE_MS);
+  };
+
+  updateEventCountdown(targetAt);
+  eventCountdownTickTimer = setInterval(() => {
+    if (targetAt <= Date.now()) {
+      hide();
+      clearEventCountdown();
+      return;
+    }
+    updateEventCountdown(targetAt);
+  }, 1000);
+  eventCountdownShowTimer = setTimeout(show, EVENT_COUNTDOWN_INITIAL_DELAY_MS);
+}
+
+function updateEventCountdown(targetAt) {
+  const remaining = Math.max(0, targetAt - Date.now());
+  const days = Math.floor(remaining / 86400000);
+  const hours = Math.floor((remaining % 86400000) / 3600000);
+  const minutes = Math.floor((remaining % 3600000) / 60000);
+  const seconds = Math.floor((remaining % 60000) / 1000);
+  const values = [
+    [days, "Days"],
+    [hours, "Hours"],
+    [minutes, "Minutes"],
+    [seconds, "Seconds"],
+  ];
+
+  document.querySelectorAll("[data-event-countdown-value]").forEach((timer) => {
+    timer.innerHTML = values
+      .map(
+        ([value, label]) => `
+          <span>
+            <strong>${String(value).padStart(2, "0")}</strong>
+            <small>${label}</small>
+          </span>`,
+      )
+      .join("");
+  });
+}
+
 async function renderBrightSignPlayer(screenIds = []) {
   const outputScreenIds = [...screenIds, ...state.screens.map((screen) => screen.id)]
     .filter((id, index, all) => id && all.indexOf(id) === index)
@@ -1574,10 +1684,13 @@ async function renderBrightSignPlayer(screenIds = []) {
         return `
           <div class="brightsign-output" data-brightsign-output="${index}" data-screen-id="${screenId}">
             <div class="brightsign-stage" data-loading="true"></div>
+            ${eventCountdownMarkup({ compact: true })}
           </div>`;
       }).join("")}
     </section>
   `;
+
+  brightsignDeployToken = state.deployToken || "";
 
   brightsignSessions = outputScreenIds.map((screenId, index) => {
     const session = {
@@ -1596,6 +1709,7 @@ async function renderBrightSignPlayer(screenIds = []) {
   });
 
   scheduleBrightSignRefresh(outputScreenIds);
+  startEventCountdown();
 }
 
 async function startBrightSignOutput(session) {
@@ -1712,7 +1826,14 @@ function showBrightSignMessage(stage, title, message) {
 
 function scheduleBrightSignRefresh(screenIds) {
   brightsignRefreshTimer = setTimeout(async () => {
-    state = await loadState();
+    const nextState = await loadState();
+    const nextDeployToken = nextState.deployToken || "";
+    if (nextDeployToken && nextDeployToken !== brightsignDeployToken) {
+      reloadPlayerWindow("remote");
+      return;
+    }
+
+    state = nextState;
     const shouldSaveHeartbeat = Date.now() - brightsignLastHeartbeatAt >= PLAYER_HEARTBEAT_INTERVAL_MS;
     if (shouldSaveHeartbeat) {
       screenIds.forEach((screenId) => markScreenOnline(screenId, { persist: false }));
@@ -1744,6 +1865,7 @@ async function renderPlayer(screenId) {
   app.innerHTML = `
     <section class="player">
       <div id="playerStage" class="player-stage"></div>
+      ${eventCountdownMarkup()}
     </section>
   `;
 
@@ -1797,6 +1919,7 @@ async function renderPlayer(screenId) {
   scheduleDailyRolloverReload(screenId);
   scheduleBlankRecoveryCheck(screenId);
   schedulePlayerRefresh(screenId);
+  startEventCountdown();
 }
 
 function schedulePlayerRefresh(screenId) {

@@ -634,6 +634,174 @@ button {
   object-fit: cover;
 }
 
+.event-countdown {
+  position: absolute;
+  z-index: 20;
+  right: 32px;
+  bottom: 28px;
+  left: 32px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 32px;
+  min-height: 132px;
+  padding: 22px 26px;
+  overflow: hidden;
+  border: 2px solid #efb84c;
+  border-left: 10px solid #a51d36;
+  border-radius: 8px;
+  background: rgba(13, 20, 19, 0.97);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.46);
+  color: #fffaf0;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(calc(100% + 60px));
+  transition: opacity 320ms ease, transform 420ms ease;
+}
+
+.event-countdown.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.event-countdown-copy {
+  min-width: 0;
+}
+
+.event-countdown-kicker,
+.event-countdown-subtitle,
+.event-countdown h2 {
+  letter-spacing: 0;
+}
+
+.event-countdown-kicker {
+  margin: 0 0 4px;
+  color: #efb84c;
+  font-size: 16px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.event-countdown h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 34px;
+  line-height: 1.05;
+}
+
+.event-countdown-subtitle {
+  margin: 5px 0 0;
+  color: #f5cbd2;
+  font-size: 24px;
+  font-weight: 750;
+}
+
+.event-countdown-timer {
+  display: grid;
+  grid-template-columns: repeat(4, 74px);
+  gap: 8px;
+}
+
+.event-countdown-timer span {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  padding: 9px 5px 8px;
+  border: 1px solid rgba(239, 184, 76, 0.55);
+  border-radius: 6px;
+  background: #213a34;
+}
+
+.event-countdown-timer strong {
+  font-size: 34px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.event-countdown-timer small {
+  margin-top: 5px;
+  color: #d9e6df;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.event-countdown.is-compact {
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  gap: 12px;
+  min-height: 0;
+  padding: 10px 12px;
+  border-width: 1px 1px 1px 5px;
+  border-radius: 6px;
+}
+
+.event-countdown.is-compact .event-countdown-kicker {
+  margin-bottom: 2px;
+  font-size: 10px;
+}
+
+.event-countdown.is-compact h2 {
+  font-size: 18px;
+}
+
+.event-countdown.is-compact .event-countdown-subtitle {
+  margin-top: 2px;
+  font-size: 13px;
+}
+
+.event-countdown.is-compact .event-countdown-timer {
+  grid-template-columns: repeat(4, 42px);
+  gap: 4px;
+}
+
+.event-countdown.is-compact .event-countdown-timer span {
+  padding: 5px 2px;
+}
+
+.event-countdown.is-compact .event-countdown-timer strong {
+  font-size: 18px;
+}
+
+.event-countdown.is-compact .event-countdown-timer small {
+  margin-top: 2px;
+  font-size: 7px;
+}
+
+@media (max-width: 700px) {
+  .event-countdown {
+    right: 14px;
+    bottom: 14px;
+    left: 14px;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    min-height: 0;
+    padding: 16px;
+    border-left-width: 7px;
+  }
+
+  .event-countdown-kicker {
+    font-size: 12px;
+  }
+
+  .event-countdown h2 {
+    font-size: 24px;
+  }
+
+  .event-countdown-subtitle {
+    font-size: 18px;
+  }
+
+  .event-countdown-timer {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .event-countdown-timer strong {
+    font-size: 26px;
+  }
+}
+
 .demo-slide {
   display: grid;
   width: 100%;
