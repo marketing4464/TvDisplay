@@ -634,37 +634,76 @@ button {
   object-fit: cover;
 }
 
-.event-countdown {
-  position: absolute;
-  z-index: 20;
-  right: 32px;
-  bottom: 28px;
-  left: 32px;
+.player.is-calendar-event-player {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 112px;
-  align-items: center;
-  gap: 32px;
-  min-height: 132px;
-  padding: 22px 26px;
-  overflow: hidden;
-  border: 2px solid #efb84c;
-  border-left: 10px solid #a51d36;
-  border-radius: 8px;
-  background: rgba(13, 20, 19, 0.97);
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.46);
-  color: #fffaf0;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(calc(100% + 60px));
-  transition: opacity 320ms ease, transform 420ms ease;
+  grid-template-rows: minmax(0, 1fr) 196px;
 }
 
-.event-countdown.is-visible {
+.player.is-calendar-event-player .player-stage {
+  position: relative;
+  inset: auto;
+  min-width: 0;
+  min-height: 0;
+  background: #eef1e9;
+}
+
+.player.is-calendar-event-player .player-stage img,
+.player.is-calendar-event-player .player-stage video {
+  object-fit: contain;
+}
+
+.brightsign-output.is-calendar-event-output {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 120px;
+}
+
+.brightsign-output.is-calendar-event-output .brightsign-stage {
+  min-height: 0;
+  background: #eef1e9;
+}
+
+.brightsign-output.is-calendar-event-output .brightsign-stage img,
+.brightsign-output.is-calendar-event-output .brightsign-stage video {
+  object-fit: contain;
+}
+
+.event-countdown {
+  position: relative;
+  z-index: 20;
+  display: grid;
+  grid-template-areas: "artwork copy timer qr";
+  grid-template-columns: 336px minmax(0, 1fr) auto 112px;
+  align-items: center;
+  gap: 18px;
+  width: 100%;
+  height: 196px;
+  padding: 8px 18px;
+  overflow: hidden;
+  border-top: 3px solid #a51d36;
+  background: #080c0f;
+  color: #fffaf0;
   opacity: 1;
-  transform: translateY(0);
+  pointer-events: none;
+  transform: none;
+}
+
+.event-countdown-artwork {
+  grid-area: artwork;
+  width: 336px;
+  height: 176px;
+  overflow: hidden;
+  border-right: 2px solid #a51d36;
+}
+
+.event-countdown-artwork img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .event-countdown-copy {
+  grid-area: copy;
   min-width: 0;
 }
 
@@ -677,7 +716,7 @@ button {
 .event-countdown-kicker {
   margin: 0 0 4px;
   color: #efb84c;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 800;
   text-transform: uppercase;
 }
@@ -685,21 +724,22 @@ button {
 .event-countdown h2 {
   margin: 0;
   overflow-wrap: anywhere;
-  font-size: 34px;
+  font-size: 30px;
   line-height: 1.05;
 }
 
 .event-countdown-subtitle {
   margin: 5px 0 0;
   color: #f5cbd2;
-  font-size: 24px;
+  font-size: 20px;
   font-weight: 750;
 }
 
 .event-countdown-timer {
+  grid-area: timer;
   display: grid;
-  grid-template-columns: repeat(4, 74px);
-  gap: 8px;
+  grid-template-columns: repeat(4, 66px);
+  gap: 6px;
 }
 
 .event-countdown-timer span {
@@ -713,7 +753,7 @@ button {
 }
 
 .event-countdown-timer strong {
-  font-size: 34px;
+  font-size: 30px;
   font-variant-numeric: tabular-nums;
   line-height: 1.15;
 }
@@ -727,6 +767,7 @@ button {
 }
 
 .event-countdown-qr {
+  grid-area: qr;
   display: grid;
   place-items: center;
   gap: 4px;
@@ -754,15 +795,22 @@ button {
 }
 
 .event-countdown.is-compact {
-  grid-template-columns: minmax(0, 1fr) auto 88px;
-  right: 12px;
-  bottom: 12px;
-  left: 12px;
-  gap: 12px;
-  min-height: 0;
-  padding: 10px 12px;
-  border-width: 1px 1px 1px 5px;
-  border-radius: 6px;
+  grid-template-areas: "artwork timer qr";
+  grid-template-columns: 205px minmax(0, 1fr) 88px;
+  gap: 8px;
+  height: 120px;
+  padding: 5px 8px;
+  border-top-width: 2px;
+}
+
+.event-countdown.is-compact .event-countdown-artwork {
+  width: 205px;
+  height: 108px;
+  border-right-width: 1px;
+}
+
+.event-countdown.is-compact .event-countdown-copy {
+  display: none;
 }
 
 .event-countdown.is-compact .event-countdown-kicker {
@@ -780,8 +828,8 @@ button {
 }
 
 .event-countdown.is-compact .event-countdown-timer {
-  grid-template-columns: repeat(4, 42px);
-  gap: 4px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
 }
 
 .event-countdown.is-compact .event-countdown-timer span {
@@ -813,15 +861,30 @@ button {
 }
 
 @media (max-width: 700px) {
+  .player.is-calendar-event-player {
+    grid-template-rows: minmax(0, 1fr) 400px;
+  }
+
   .event-countdown {
-    right: 14px;
-    bottom: 14px;
-    left: 14px;
-    grid-template-columns: 1fr;
-    gap: 12px;
-    min-height: 0;
-    padding: 16px;
-    border-left-width: 7px;
+    grid-template-areas:
+      "artwork artwork"
+      "copy qr"
+      "timer timer";
+    grid-template-columns: minmax(0, 1fr) 112px;
+    gap: 10px;
+    height: 400px;
+    padding: 8px 14px;
+  }
+
+  .event-countdown-artwork {
+    width: 100%;
+    height: 180px;
+    border-right: 0;
+    border-bottom: 1px solid #a51d36;
+  }
+
+  .event-countdown-copy {
+    align-self: center;
   }
 
   .event-countdown-kicker {
@@ -829,11 +892,11 @@ button {
   }
 
   .event-countdown h2 {
-    font-size: 24px;
+    font-size: 22px;
   }
 
   .event-countdown-subtitle {
-    font-size: 18px;
+    font-size: 16px;
   }
 
   .event-countdown-timer {
@@ -841,7 +904,7 @@ button {
   }
 
   .event-countdown-timer strong {
-    font-size: 26px;
+    font-size: 24px;
   }
 
   .event-countdown-qr {

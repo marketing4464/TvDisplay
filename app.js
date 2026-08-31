@@ -25,11 +25,9 @@ const EVENT_COUNTDOWN = {
   subtitle: "A Killer Halloween!",
   targetAt: "2026-10-15T19:00:00-04:00",
   dateLabel: "October 15 at 7 PM",
+  artworkSrc: "./assets/ope-murder-mystery-promo.png",
   qrSrc: "./assets/ope-murder-mystery-qr.png",
 };
-const EVENT_COUNTDOWN_INITIAL_DELAY_MS = 5000;
-const EVENT_COUNTDOWN_VISIBLE_MS = 15000;
-const EVENT_COUNTDOWN_REPEAT_MS = 5 * 60 * 1000;
 const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
 const ALL_DAY_INDEXES = [0, 1, 2, 3, 4, 5, 6];
@@ -135,8 +133,6 @@ let brightsignSessions = [];
 let brightsignRefreshTimer = null;
 let brightsignLastHeartbeatAt = 0;
 let brightsignDeployToken = "";
-let eventCountdownShowTimer = null;
-let eventCountdownHideTimer = null;
 let eventCountdownTickTimer = null;
 let activePlayerObjectUrl = null;
 let saveQueue = Promise.resolve();
@@ -573,11 +569,7 @@ function clearBrightSignSessions() {
 }
 
 function clearEventCountdown() {
-  clearTimeout(eventCountdownShowTimer);
-  clearTimeout(eventCountdownHideTimer);
   clearInterval(eventCountdownTickTimer);
-  eventCountdownShowTimer = null;
-  eventCountdownHideTimer = null;
   eventCountdownTickTimer = null;
 }
 
@@ -1590,7 +1582,10 @@ function parseBrightSignScreenIds(value) {
 
 function eventCountdownMarkup({ compact = false } = {}) {
   return `
-    <aside class="event-countdown${compact ? " is-compact" : ""}" data-event-countdown aria-hidden="true">
+    <aside class="event-countdown is-visible${compact ? " is-compact" : ""}" data-event-countdown aria-hidden="false">
+      <div class="event-countdown-artwork">
+        <img src="${EVENT_COUNTDOWN.artworkSrc}" alt="OPE Murder Mystery: A Killer Halloween event artwork" />
+      </div>
       <div class="event-countdown-copy">
         <p class="event-countdown-kicker">${escapeHtml(EVENT_COUNTDOWN.dateLabel)}</p>
         <h2>${escapeHtml(EVENT_COUNTDOWN.title)}</h2>
@@ -1611,45 +1606,18 @@ function startEventCountdown() {
   const overlays = [...document.querySelectorAll("[data-event-countdown]")];
   if (!Number.isFinite(targetAt) || targetAt <= Date.now() || !overlays.length) return;
 
-  const hide = () => {
-    overlays.forEach((overlay) => {
-      overlay.classList.remove("is-visible");
-      overlay.setAttribute("aria-hidden", "true");
-    });
-  };
-
-  const show = () => {
+  const update = () => {
     if (targetAt <= Date.now()) {
-      hide();
+      overlays.forEach((overlay) => overlay.remove());
       clearEventCountdown();
       return;
     }
 
     updateEventCountdown(targetAt);
-    overlays.forEach((overlay) => {
-      overlay.classList.add("is-visible");
-      overlay.setAttribute("aria-hidden", "false");
-    });
-
-    eventCountdownHideTimer = setTimeout(() => {
-      hide();
-      eventCountdownShowTimer = setTimeout(
-        show,
-        Math.max(1000, EVENT_COUNTDOWN_REPEAT_MS - EVENT_COUNTDOWN_VISIBLE_MS),
-      );
-    }, EVENT_COUNTDOWN_VISIBLE_MS);
   };
 
-  updateEventCountdown(targetAt);
-  eventCountdownTickTimer = setInterval(() => {
-    if (targetAt <= Date.now()) {
-      hide();
-      clearEventCountdown();
-      return;
-    }
-    updateEventCountdown(targetAt);
-  }, 1000);
-  eventCountdownShowTimer = setTimeout(show, EVENT_COUNTDOWN_INITIAL_DELAY_MS);
+  update();
+  eventCountdownTickTimer = setInterval(update, 1000);
 }
 
 function updateEventCountdown(targetAt) {
@@ -1688,7 +1656,7 @@ async function renderBrightSignPlayer(screenIds = []) {
       ${Array.from({ length: BRIGHTSIGN_OUTPUT_COUNT }, (_, index) => {
         const screenId = outputScreenIds[index] || "";
         return `
-          <div class="brightsign-output" data-brightsign-output="${index}" data-screen-id="${screenId}">
+          <div class="brightsign-output${screenId === EVENT_COUNTDOWN.screenId ? " is-calendar-event-output" : ""}" data-brightsign-output="${index}" data-screen-id="${screenId}">
             <div class="brightsign-stage" data-loading="true"></div>
             ${screenId === EVENT_COUNTDOWN.screenId ? eventCountdownMarkup({ compact: true }) : ""}
           </div>`;
@@ -1869,7 +1837,7 @@ async function renderPlayer(screenId) {
   markScreenOnline(screenId);
 
   app.innerHTML = `
-    <section class="player">
+    <section class="player${screen.id === EVENT_COUNTDOWN.screenId ? " is-calendar-event-player" : ""}">
       <div id="playerStage" class="player-stage"></div>
       ${screen.id === EVENT_COUNTDOWN.screenId ? eventCountdownMarkup() : ""}
     </section>
