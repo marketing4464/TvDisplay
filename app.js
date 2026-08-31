@@ -20,10 +20,12 @@ const PLAYER_DAILY_ROLLOVER_BUFFER_MS = 90000;
 const MEDIA_READY_TIMEOUT_MS = 30000;
 const BRIGHTSIGN_OUTPUT_COUNT = 4;
 const EVENT_COUNTDOWN = {
+  screenId: "screen-74mqdbjc",
   title: "OPE Murder Mystery",
   subtitle: "A Killer Halloween!",
   targetAt: "2026-10-15T19:00:00-04:00",
   dateLabel: "October 15 at 7 PM",
+  qrSrc: "./assets/ope-murder-mystery-qr.png",
 };
 const EVENT_COUNTDOWN_INITIAL_DELAY_MS = 5000;
 const EVENT_COUNTDOWN_VISIBLE_MS = 15000;
@@ -1595,6 +1597,10 @@ function eventCountdownMarkup({ compact = false } = {}) {
         <p class="event-countdown-subtitle">${escapeHtml(EVENT_COUNTDOWN.subtitle)}</p>
       </div>
       <div class="event-countdown-timer" data-event-countdown-value></div>
+      <div class="event-countdown-qr">
+        <img src="${EVENT_COUNTDOWN.qrSrc}" alt="QR code for OPE Murder Mystery event details" />
+        <span>Scan for details</span>
+      </div>
     </aside>`;
 }
 
@@ -1684,7 +1690,7 @@ async function renderBrightSignPlayer(screenIds = []) {
         return `
           <div class="brightsign-output" data-brightsign-output="${index}" data-screen-id="${screenId}">
             <div class="brightsign-stage" data-loading="true"></div>
-            ${eventCountdownMarkup({ compact: true })}
+            ${screenId === EVENT_COUNTDOWN.screenId ? eventCountdownMarkup({ compact: true }) : ""}
           </div>`;
       }).join("")}
     </section>
@@ -1865,7 +1871,7 @@ async function renderPlayer(screenId) {
   app.innerHTML = `
     <section class="player">
       <div id="playerStage" class="player-stage"></div>
-      ${eventCountdownMarkup()}
+      ${screen.id === EVENT_COUNTDOWN.screenId ? eventCountdownMarkup() : ""}
     </section>
   `;
 

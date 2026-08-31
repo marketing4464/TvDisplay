@@ -641,7 +641,7 @@ button {
   bottom: 28px;
   left: 32px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto 112px;
   align-items: center;
   gap: 32px;
   min-height: 132px;
@@ -726,7 +726,35 @@ button {
   text-transform: uppercase;
 }
 
+.event-countdown-qr {
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  width: 112px;
+}
+
+.event-countdown-qr img {
+  display: block;
+  width: 112px;
+  height: 112px;
+  padding: 5px;
+  border-radius: 4px;
+  background: #fff;
+  object-fit: contain;
+}
+
+.event-countdown-qr span {
+  color: #fffaf0;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .event-countdown.is-compact {
+  grid-template-columns: minmax(0, 1fr) auto 88px;
   right: 12px;
   bottom: 12px;
   left: 12px;
@@ -769,6 +797,21 @@ button {
   font-size: 7px;
 }
 
+.event-countdown.is-compact .event-countdown-qr {
+  gap: 2px;
+  width: 88px;
+}
+
+.event-countdown.is-compact .event-countdown-qr img {
+  width: 88px;
+  height: 88px;
+  padding: 4px;
+}
+
+.event-countdown.is-compact .event-countdown-qr span {
+  font-size: 7px;
+}
+
 @media (max-width: 700px) {
   .event-countdown {
     right: 14px;
@@ -799,6 +842,10 @@ button {
 
   .event-countdown-timer strong {
     font-size: 26px;
+  }
+
+  .event-countdown-qr {
+    justify-self: center;
   }
 }
 
