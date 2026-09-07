@@ -18,6 +18,18 @@ function json(data, init = {}) {
   });
 }
 
+function normalizeEtag(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^W\//i, "")
+    .replace(/^"|"$/g, "");
+}
+
+function publicEtag(value) {
+  const etag = normalizeEtag(value);
+  return etag ? `W/"${etag}"` : "";
+}
+
 function validateState(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("SignalDeck state must be a JSON object.");
@@ -34,8 +46,8 @@ function validateState(value) {
 
 export async function GET(request) {
   try {
-    const currentVersion = request.headers.get("if-none-match");
-    const headers = currentVersion ? { "If-None-Match": currentVersion } : undefined;
+    const currentVersion = normalizeEtag(request.headers.get("if-none-match"));
+    const headers = currentVersion ? { "If-None-Match": publicEtag(currentVersion) } : undefined;
     const response = await fetch(stateUrl(), { headers });
 
     if (response.status === 304) {
@@ -43,7 +55,7 @@ export async function GET(request) {
         status: 304,
         headers: {
           "Cache-Control": "no-store",
-          ETag: currentVersion,
+          ETag: publicEtag(currentVersion),
         },
       });
     }
@@ -55,7 +67,7 @@ export async function GET(request) {
     const state = validateState(await response.json());
     return json({
       storage: "vercel-blob",
-      version: response.headers.get("etag") || "",
+      version: normalizeEtag(response.headers.get("etag")),
       state,
     });
   } catch (error) {
@@ -66,7 +78,7 @@ export async function GET(request) {
 export async function PUT(request) {
   try {
     const state = validateState(await request.json());
-    const currentVersion = request.headers.get("if-match");
+    const currentVersion = normalizeEtag(request.headers.get("if-match"));
     const options = {
       access: "public",
       allowOverwrite: true,
@@ -79,7 +91,7 @@ export async function PUT(request) {
     }
 
     const blob = await put(STATE_PATH, JSON.stringify(state), options);
-    return json({ ok: true, savedAt: Date.now(), version: blob.etag, url: blob.url });
+    return json({ ok: true, savedAt: Date.now(), version: normalizeEtag(blob.etag), url: blob.url });
   } catch (error) {
     if (error instanceof BlobPreconditionFailedError) {
       return json(
