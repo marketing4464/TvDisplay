@@ -49,8 +49,12 @@ export async function GET(request) {
     const currentVersion = normalizeEtag(request.headers.get("if-none-match"));
     const headers = currentVersion ? { "If-None-Match": publicEtag(currentVersion) } : undefined;
     const response = await fetch(stateUrl(), { headers });
+    const responseVersion = normalizeEtag(response.headers.get("etag"));
 
-    if (response.status === 304) {
+    if (
+      response.status === 304 ||
+      (response.ok && currentVersion && responseVersion === currentVersion)
+    ) {
       return new Response(null, {
         status: 304,
         headers: {
@@ -67,7 +71,7 @@ export async function GET(request) {
     const state = validateState(await response.json());
     return json({
       storage: "vercel-blob",
-      version: normalizeEtag(response.headers.get("etag")),
+      version: responseVersion,
       state,
     });
   } catch (error) {
