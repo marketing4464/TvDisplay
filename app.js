@@ -169,7 +169,7 @@ function uid(prefix) {
 
 async function loadState() {
   try {
-    const headers = stateVersion ? { "If-None-Match": stateVersion } : undefined;
+    const headers = stateVersion ? { "X-SignalDeck-Version": stateVersion } : undefined;
     const response = await fetch(STATE_API, {
       cache: "no-store",
       headers,
@@ -233,7 +233,7 @@ function saveState() {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
-          ...(stateVersion ? { "If-Match": stateVersion } : {}),
+          ...(stateVersion ? { "X-SignalDeck-Version": stateVersion } : {}),
         },
         body: snapshot,
       });

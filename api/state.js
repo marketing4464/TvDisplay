@@ -46,7 +46,9 @@ function validateState(value) {
 
 export async function GET(request) {
   try {
-    const currentVersion = normalizeEtag(request.headers.get("if-none-match"));
+    const currentVersion = normalizeEtag(
+      request.headers.get("x-signaldeck-version") || request.headers.get("if-none-match"),
+    );
     const headers = currentVersion ? { "If-None-Match": publicEtag(currentVersion) } : undefined;
     const response = await fetch(stateUrl(), { headers });
     const responseVersion = normalizeEtag(response.headers.get("etag"));
@@ -82,7 +84,9 @@ export async function GET(request) {
 export async function PUT(request) {
   try {
     const state = validateState(await request.json());
-    const currentVersion = normalizeEtag(request.headers.get("if-match"));
+    const currentVersion = normalizeEtag(
+      request.headers.get("x-signaldeck-version") || request.headers.get("if-match"),
+    );
     const options = {
       access: "public",
       allowOverwrite: true,
