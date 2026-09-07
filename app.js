@@ -10,6 +10,7 @@ const REMOTE_MEDIA_CACHE_PREFIX = "remote-media";
 const SCHEDULE_TIME_ZONE = "America/New_York";
 const SLIDE_DURATION_SECONDS = 120;
 const PLAYER_SYNC_INTERVAL_MS = 30000;
+const PLAYER_FULL_STATE_REFRESH_MS = 60 * 60 * 1000;
 const PLAYER_HEARTBEAT_INTERVAL_MS = 60000;
 const PLAYER_BLANK_RECOVERY_MS = 45000;
 const PLAYER_DAILY_ROLLOVER_BUFFER_MS = 90000;
@@ -134,6 +135,8 @@ let activePlayerObjectUrl = null;
 let saveQueue = Promise.resolve();
 let cloudStorageAvailable = false;
 let stateVersion = "";
+let stateVersionUrl = "";
+let lastFullStateLoadAt = 0;
 let blobUpload = null;
 const mediaCachePromises = new Map();
 const mediaObjectUrls = new Map();
@@ -169,13 +172,35 @@ function uid(prefix) {
 
 async function loadState() {
   try {
-    const headers = stateVersion ? { "X-SignalDeck-Version": stateVersion } : undefined;
+    const needsSafetyRefresh = Date.now() - lastFullStateLoadAt >= PLAYER_FULL_STATE_REFRESH_MS;
+
+    if (stateVersion && stateVersionUrl && !needsSafetyRefresh) {
+      try {
+        const versionResponse = await fetch(stateVersionUrl);
+        if (versionResponse.ok) {
+          const marker = await versionResponse.json();
+          if (marker.version === stateVersion) {
+            cloudStorageAvailable = true;
+            return state;
+          }
+        }
+      } catch {
+        // Fall back to the state API when the lightweight marker cannot be read.
+      }
+    }
+
+    const headers = {
+      ...(stateVersion ? { "X-SignalDeck-Version": stateVersion } : {}),
+      ...(needsSafetyRefresh && stateVersion ? { "X-SignalDeck-Force-Full": "1" } : {}),
+    };
     const response = await fetch(STATE_API, {
       cache: "no-store",
       headers,
     });
 
     if (response.status === 304) {
+      stateVersionUrl = response.headers.get("x-signaldeck-version-url") || stateVersionUrl;
+      lastFullStateLoadAt = Date.now();
       cloudStorageAvailable = true;
       return state;
     }
@@ -188,6 +213,8 @@ async function loadState() {
     const payload = await response.json();
     const nextState = normalizeState(payload.state || payload);
     stateVersion = payload.version || response.headers.get("etag") || "";
+    stateVersionUrl = payload.versionUrl || stateVersionUrl;
+    lastFullStateLoadAt = Date.now();
     cloudStorageAvailable = true;
     syncStatus = {
       label: "Vercel saved",
@@ -220,14 +247,14 @@ function saveState() {
   localStorage.setItem(STATE_KEY, JSON.stringify(state));
 
   if (!cloudStorageAvailable) {
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
 
   const snapshot = JSON.stringify({
     ...state,
     activeView: "overview",
   });
-  saveQueue = saveQueue
+  const operation = saveQueue
     .then(async () => {
       const response = await fetch(STATE_API, {
         method: "PUT",
@@ -245,21 +272,26 @@ function saveState() {
 
       const payload = await response.json();
       stateVersion = payload.version || stateVersion;
+      stateVersionUrl = payload.versionUrl || stateVersionUrl;
+      lastFullStateLoadAt = Date.now();
       syncStatus = {
         label: "Vercel saved",
         detail: `Last saved ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`,
         mode: "online",
       };
+      return true;
     })
-    .catch(() => {
+    .catch((error) => {
       syncStatus = {
         label: "Save issue",
-        detail: "Changes are saved locally; reload before editing again",
+        detail: error.message || "Changes were not saved to shared storage",
         mode: "warning",
       };
+      return false;
     });
 
-  return saveQueue;
+  saveQueue = operation.then(() => undefined);
+  return operation;
 }
 
 function normalizeState(nextState) {
@@ -917,9 +949,9 @@ async function hydrateAssetGrid() {
       const src = await assetSrc(asset, { cacheRemote: false });
       let thumb = `<div class="thumb demo">${asset.headline || "Slide"}</div>`;
       if (src && asset.type.startsWith("image/")) {
-        thumb = `<div class="thumb"><img src="${src}" alt="${asset.name}" /></div>`;
+        thumb = `<div class="thumb"><img src="${escapeHtml(src)}" alt="${escapeHtml(asset.name)}" loading="lazy" decoding="async" /></div>`;
       } else if (src && asset.type.startsWith("video/")) {
-        thumb = `<div class="thumb"><video src="${src}" muted></video></div>`;
+        thumb = `<div class="thumb video-placeholder"><span aria-hidden="true"></span><small>Video</small></div>`;
       }
       return `
         <article class="asset-card">
@@ -948,17 +980,32 @@ async function handleUpload(event) {
   await requestPersistentStorage();
   const files = [...event.target.files];
   const uploadInput = event.target;
+  const previousState = structuredClone(state);
+  const uploadedAssets = [];
+  let skippedDuplicates = 0;
   uploadInput.disabled = true;
 
   try {
     for (const file of files) {
+      const displayName = file.name.replace(/\.[^.]+$/, "");
+      const duplicate = state.assets.some(
+        (asset) =>
+          asset.name.trim().toLowerCase() === displayName.trim().toLowerCase() &&
+          Number(asset.size) === file.size &&
+          (!asset.type || !file.type || asset.type === file.type),
+      );
+      if (duplicate) {
+        skippedDuplicates += 1;
+        continue;
+      }
+
       const id = uid("asset");
       const isVideo = file.type.startsWith("video/");
       const videoDuration = await readVideoDuration(file);
 
       const asset = {
         id,
-        name: file.name.replace(/\.[^.]+$/, ""),
+        name: displayName,
         type: file.type || "application/octet-stream",
         durationMode: isVideo ? "full-video" : "fixed",
         duration: isVideo ? videoDuration : SLIDE_DURATION_SECONDS,
@@ -975,12 +1022,33 @@ async function handleUpload(event) {
         await putBlob(id, file);
       }
 
+      uploadedAssets.push(asset);
       state.assets.unshift(asset);
     }
 
-    publishContentUpdate({ allScreens: true });
-    await saveState();
+    if (uploadedAssets.length) {
+      publishContentUpdate({ allScreens: true });
+      const saved = await saveState();
+      if (!saved) throw new Error("The upload could not be committed to shared storage.");
+    }
+
+    if (skippedDuplicates) {
+      syncStatus = {
+        label: uploadedAssets.length ? "Upload complete" : "Already uploaded",
+        detail: `${skippedDuplicates} duplicate file${skippedDuplicates === 1 ? " was" : "s were"} skipped`,
+        mode: "online",
+      };
+    }
   } catch (error) {
+    state = previousState;
+    localStorage.setItem(STATE_KEY, JSON.stringify(state));
+    await Promise.all(
+      uploadedAssets.map((asset) =>
+        asset.url
+          ? deleteMediaFile(asset.pathname || asset.path, asset.url).catch(() => {})
+          : deleteBlob(asset.id).catch(() => {}),
+      ),
+    );
     syncStatus = {
       label: "Upload failed",
       detail: error.message || "Try again after checking storage setup",
@@ -995,21 +1063,42 @@ async function handleUpload(event) {
 
 async function removeAsset(assetId) {
   const asset = state.assets.find((item) => item.id === assetId);
+  if (!asset) return;
+
+  const previousState = structuredClone(state);
   state.assets = state.assets.filter((asset) => asset.id !== assetId);
   state.playlists = state.playlists.map((playlist) => ({
     ...playlist,
     assetIds: playlist.assetIds.filter((id) => id !== assetId),
   }));
   publishContentUpdate({ allScreens: true });
+  const saved = await saveState();
 
-  if (asset?.url && cloudStorageAvailable) {
-    await deleteMediaFile(asset.pathname || asset.path, asset.url);
+  if (!saved) {
+    state = previousState;
+    localStorage.setItem(STATE_KEY, JSON.stringify(state));
+    render();
+    return;
+  }
+
+  const blobStillReferenced = state.assets.some(
+    (item) => item.url && item.url === asset.url,
+  );
+  if (asset.url) {
+    if (cloudStorageAvailable && !blobStillReferenced) {
+      await deleteMediaFile(asset.pathname || asset.path, asset.url).catch((error) => {
+        syncStatus = {
+          label: "Cleanup needed",
+          detail: error.message || "The library was updated, but its old Blob could not be removed",
+          mode: "warning",
+        };
+      });
+    }
     await deleteBlob(remoteMediaCacheKey(asset)).catch(() => {});
   } else {
     await deleteBlob(assetId);
   }
 
-  await saveState();
   render();
 }
 

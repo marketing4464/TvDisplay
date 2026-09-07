@@ -1,11 +1,12 @@
-import { BlobPreconditionFailedError, put } from "@vercel/blob";
+import { BlobPreconditionFailedError, get, put } from "@vercel/blob";
 
 const STATE_PATH = "state/signaldeck-state.json";
+const VERSION_PATH = "state/signaldeck-version.json";
 const DEFAULT_BLOB_BASE_URL = "https://fkwkmsorbvyjzsu8.public.blob.vercel-storage.com";
 
-function stateUrl() {
+function blobUrl(pathname) {
   const baseUrl = process.env.BLOB_BASE_URL || DEFAULT_BLOB_BASE_URL;
-  return `${baseUrl.replace(/\/$/, "")}/${STATE_PATH}`;
+  return `${baseUrl.replace(/\/$/, "")}/${pathname}`;
 }
 
 function json(data, init = {}) {
@@ -49,31 +50,52 @@ export async function GET(request) {
     const currentVersion = normalizeEtag(
       request.headers.get("x-signaldeck-version") || request.headers.get("if-none-match"),
     );
-    const headers = currentVersion ? { "If-None-Match": publicEtag(currentVersion) } : undefined;
-    const response = await fetch(stateUrl(), { headers });
-    const responseVersion = normalizeEtag(response.headers.get("etag"));
+    const forceFull = request.headers.get("x-signaldeck-force-full") === "1";
 
-    if (
-      response.status === 304 ||
-      (response.ok && currentVersion && responseVersion === currentVersion)
-    ) {
+    if (currentVersion && !forceFull) {
+      const versionResponse = await fetch(blobUrl(VERSION_PATH), { cache: "no-store" });
+      if (versionResponse.ok) {
+        const marker = await versionResponse.json();
+        if (normalizeEtag(marker.version) === currentVersion) {
+          return new Response(null, {
+            status: 304,
+            headers: {
+              "Cache-Control": "no-store",
+              ETag: publicEtag(currentVersion),
+              "X-SignalDeck-Version-Url": blobUrl(VERSION_PATH),
+            },
+          });
+        }
+      }
+    }
+
+    const response = await get(STATE_PATH, {
+      access: "public",
+      useCache: false,
+      ...(currentVersion ? { ifNoneMatch: publicEtag(currentVersion) } : {}),
+    });
+
+    if (response?.statusCode === 304) {
       return new Response(null, {
         status: 304,
         headers: {
           "Cache-Control": "no-store",
           ETag: publicEtag(currentVersion),
+          "X-SignalDeck-Version-Url": blobUrl(VERSION_PATH),
         },
       });
     }
 
-    if (!response.ok) {
-      throw new Error(`Unable to read saved SignalDeck state (${response.status}).`);
+    if (!response?.stream) {
+      throw new Error("Unable to read saved SignalDeck state.");
     }
 
-    const state = validateState(await response.json());
+    const responseVersion = normalizeEtag(response.blob.etag);
+    const state = validateState(await new Response(response.stream).json());
     return json({
       storage: "vercel-blob",
       version: responseVersion,
+      versionUrl: blobUrl(VERSION_PATH),
       state,
     });
   } catch (error) {
@@ -99,7 +121,22 @@ export async function PUT(request) {
     }
 
     const blob = await put(STATE_PATH, JSON.stringify(state), options);
-    return json({ ok: true, savedAt: Date.now(), version: normalizeEtag(blob.etag), url: blob.url });
+    const savedAt = Date.now();
+    const version = normalizeEtag(blob.etag);
+    const versionUrl = blobUrl(VERSION_PATH);
+
+    try {
+      await put(VERSION_PATH, JSON.stringify({ version, savedAt }), {
+        access: "public",
+        allowOverwrite: true,
+        contentType: "application/json",
+        cacheControlMaxAge: 60,
+      });
+    } catch (error) {
+      console.error("SignalDeck state saved, but its version marker could not be updated", error);
+    }
+
+    return json({ ok: true, savedAt, version, versionUrl, url: blob.url });
   } catch (error) {
     if (error instanceof BlobPreconditionFailedError) {
       return json(

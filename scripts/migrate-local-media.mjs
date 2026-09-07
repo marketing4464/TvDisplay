@@ -66,20 +66,23 @@ function originalMediaPath(asset, mediaDir) {
   return path.join(mediaDir, `${asset.name}${extension}`);
 }
 
-async function loadWorkingState(options) {
+async function loadWorkingState(options, sourceState) {
   try {
-    const checkpoint = JSON.parse(await readFile(options.outputPath, "utf8"));
+    const checkpointPayload = JSON.parse(await readFile(options.outputPath, "utf8"));
+    const checkpoint = checkpointPayload.state || checkpointPayload;
     if (checkpoint.assets?.some((asset) => asset.url?.includes(".blob.vercel-storage.com"))) {
       return checkpoint;
     }
   } catch {
     // Start from the recovered state when no checkpoint exists yet.
   }
-  return JSON.parse(await readFile(options.statePath, "utf8"));
+  return sourceState;
 }
 
 const options = readArgs(process.argv.slice(2));
-const state = await loadWorkingState(options);
+const sourcePayload = JSON.parse(await readFile(options.statePath, "utf8"));
+const state = await loadWorkingState(options, sourcePayload.state || sourcePayload);
+const expectedStateVersion = sourcePayload.version || "";
 const uploadedByHash = new Map();
 
 for (const asset of state.assets) {
@@ -87,7 +90,10 @@ for (const asset of state.assets) {
   const fileStats = await stat(filePath);
   const digest = await sha256(filePath);
 
-  if (asset.url?.includes(".blob.vercel-storage.com")) {
+  const existingBlobResponse = asset.url?.includes(".blob.vercel-storage.com")
+    ? await fetch(asset.url, { method: "HEAD", cache: "no-store" }).catch(() => null)
+    : null;
+  if (existingBlobResponse?.ok) {
     uploadedByHash.set(digest, {
       pathname: asset.pathname || asset.path,
       url: asset.url,
@@ -101,7 +107,10 @@ for (const asset of state.assets) {
   let blob = uploadedByHash.get(digest);
   const type = contentTypeFor(filePath, asset.type);
   if (!blob) {
-    const pathname = `media/${asset.id}-${sanitizeFilename(path.basename(filePath))}`;
+    const existingPathname = asset.pathname || asset.path;
+    const pathname = existingPathname?.startsWith("media/")
+      ? existingPathname
+      : `media/${asset.id}-${sanitizeFilename(path.basename(filePath))}`;
     let lastProgress = -1;
     console.log(`Uploading: ${asset.name} (${(fileStats.size / 1024 / 1024).toFixed(1)} MB)`);
     blob = await uploadPresigned(pathname, await openAsBlob(filePath, { type }), {
@@ -144,7 +153,10 @@ state.screens = state.screens.map((screen) => ({
 
 const response = await fetch(`${options.baseUrl}/api/state`, {
   method: "PUT",
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    "Content-Type": "application/json",
+    ...(expectedStateVersion ? { "X-SignalDeck-Version": expectedStateVersion } : {}),
+  },
   body: JSON.stringify(state),
 });
 if (!response.ok) {

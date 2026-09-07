@@ -508,6 +508,26 @@ button {
   object-fit: cover;
 }
 
+.thumb.video-placeholder {
+  align-content: center;
+  gap: 8px;
+  background: #182530;
+}
+
+.thumb.video-placeholder span {
+  width: 0;
+  height: 0;
+  border-top: 16px solid transparent;
+  border-bottom: 16px solid transparent;
+  border-left: 25px solid #fff;
+}
+
+.thumb.video-placeholder small {
+  color: #cfdae3;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .thumb.demo {
   background:
     linear-gradient(120deg, rgba(20, 134, 109, 0.92), rgba(11, 107, 203, 0.9)),
