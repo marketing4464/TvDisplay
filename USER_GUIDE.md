@@ -4,11 +4,12 @@ Use TvDisplay to upload media, build playlists, create screen/player links, and 
 
 ## Important Notes
 
-- Uploaded media is saved to the shared Supabase media library when cloud storage is connected.
+- Uploaded media is saved to the shared Vercel media library when cloud storage is connected.
 - Media stays saved until you click `Delete`.
 - Uploaded videos play for their full video length.
 - Images and generated slides play for 120 seconds.
 - Media, playlists, screens, and schedules are available from other computers using the same deployed site.
+- Each player downloads new media once and keeps a persistent local copy for smooth replay.
 - If the dashboard shows `Local only`, cloud storage is not connected and changes are only saved in that browser.
 
 ## Basic Workflow
@@ -26,7 +27,7 @@ Use TvDisplay to upload media, build playlists, create screen/player links, and 
 From the project folder:
 
 ```bash
-npm run dev
+npx vercel dev
 ```
 
 Then open:
@@ -182,11 +183,11 @@ If a TV is showing the wrong content, check:
 - Is the mini PC powered on?
 - Is the browser still open on the player URL?
 - Is the correct playlist assigned to that screen?
-- Does the dashboard show `Supabase saved` instead of `Local only`?
+- Does the dashboard show `Vercel saved` instead of `Local only`?
 
 ## Current Limitations
 
 - There is no login/user management yet.
-- The current Supabase setup allows public read/write access so player computers can sync without signing in.
+- Dashboard write routes do not have login protection yet.
 - Player screens apply playlist changes after the current image or video finishes, so playback is not interrupted.
 - A normal mini PC/channel must be configured separately. A BrightSign XC4055 can run up to four SignalDeck screen zones when configured as a multi-output canvas.

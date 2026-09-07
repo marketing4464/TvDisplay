@@ -2,18 +2,14 @@ const DB_NAME = "signaldeck-media";
 const DB_VERSION = 1;
 const STATE_KEY = "signaldeck-state-v1";
 const CANONICAL_HOST = "tv-displayope.vercel.app";
-const SUPABASE_URL = "https://hvwnnvpafepmoczlvaea.supabase.co";
-const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_wHaZZ7sJDX80QKDl2p9C2w_yawu78Jp";
-const SUPABASE_STORAGE_AUTH_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh2d25udnBhZmVwbW9jemx2YWVhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE2MTEyODAsImV4cCI6MjA5NzE4NzI4MH0.VgaZEPWMn6o4a0pbwYxo3_56M34eEnQvaywcGfGQRds";
-const SUPABASE_PROJECT_REF = "hvwnnvpafepmoczlvaea";
-const SUPABASE_CLIENT_URL = "https://esm.sh/@supabase/supabase-js@2.51.0?bundle";
-const SUPABASE_BUCKET = "signaldeck-media";
-const SUPABASE_STATE_TABLE = "signaldeck_state";
-const SUPABASE_STATE_ID = "default";
+const STATE_API = "/api/state";
+const UPLOAD_API = "/api/upload";
+const MEDIA_API = "/api/media";
+const BLOB_CLIENT_URL = "https://esm.sh/@vercel/blob@2.8.0/client?bundle";
+const REMOTE_MEDIA_CACHE_PREFIX = "remote-media";
 const SCHEDULE_TIME_ZONE = "America/New_York";
 const SLIDE_DURATION_SECONDS = 120;
-const PLAYER_SYNC_INTERVAL_MS = 10000;
+const PLAYER_SYNC_INTERVAL_MS = 30000;
 const PLAYER_HEARTBEAT_INTERVAL_MS = 60000;
 const PLAYER_BLANK_RECOVERY_MS = 45000;
 const PLAYER_DAILY_ROLLOVER_BUFFER_MS = 90000;
@@ -28,8 +24,8 @@ const EVENT_COUNTDOWN = {
   artworkSrc: "./assets/ope-murder-mystery-promo.png",
   qrSrc: "./assets/ope-murder-mystery-qr.png",
 };
-const LARGE_UPLOAD_THRESHOLD_BYTES = 6 * 1024 * 1024;
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
+const MULTIPART_UPLOAD_THRESHOLD_BYTES = 100 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 const ALL_DAY_INDEXES = [0, 1, 2, 3, 4, 5, 6];
 const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const DAY_ALIASES = {
@@ -137,7 +133,10 @@ let eventCountdownTickTimer = null;
 let activePlayerObjectUrl = null;
 let saveQueue = Promise.resolve();
 let cloudStorageAvailable = false;
-let supabaseClient = null;
+let stateVersion = "";
+let blobUpload = null;
+const mediaCachePromises = new Map();
+const mediaObjectUrls = new Map();
 let syncStatus = {
   label: "Loading",
   detail: "Checking shared storage",
@@ -170,32 +169,41 @@ function uid(prefix) {
 
 async function loadState() {
   try {
-    const supabase = await getSupabaseClient();
-    const { data, error } = await supabase
-      .from(SUPABASE_STATE_TABLE)
-      .select("state")
-      .eq("id", SUPABASE_STATE_ID)
-      .maybeSingle();
+    const headers = stateVersion ? { "If-None-Match": stateVersion } : undefined;
+    const response = await fetch(STATE_API, {
+      cache: "no-store",
+      headers,
+    });
 
-    if (error) {
-      throw error;
+    if (response.status === 304) {
+      cloudStorageAvailable = true;
+      return state;
     }
 
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || "Unable to load SignalDeck state.");
+    }
+
+    const payload = await response.json();
+    const nextState = normalizeState(payload.state || payload);
+    stateVersion = payload.version || response.headers.get("etag") || "";
     cloudStorageAvailable = true;
     syncStatus = {
-      label: "Supabase saved",
+      label: "Vercel saved",
       detail: "Media and settings sync across computers",
       mode: "online",
     };
-    return normalizeState(data?.state || structuredClone(demoState));
+    localStorage.setItem(STATE_KEY, JSON.stringify(nextState));
+    return nextState;
   } catch {
-    // Fall through to the local browser cache when Supabase is unavailable.
+    // Fall through to the last known browser copy during a network interruption.
   }
 
   cloudStorageAvailable = false;
   syncStatus = {
     label: "Local only",
-    detail: "Check Supabase setup to sync across computers",
+    detail: "Vercel is temporarily unreachable; retrying automatically",
     mode: "warning",
   };
 
@@ -221,19 +229,24 @@ function saveState() {
   });
   saveQueue = saveQueue
     .then(async () => {
-      const supabase = await getSupabaseClient();
-      const { error } = await supabase.from(SUPABASE_STATE_TABLE).upsert({
-        id: SUPABASE_STATE_ID,
-        state: JSON.parse(snapshot),
-        updated_at: new Date().toISOString(),
+      const response = await fetch(STATE_API, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          ...(stateVersion ? { "If-Match": stateVersion } : {}),
+        },
+        body: snapshot,
       });
 
-      if (error) {
-        throw error;
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || "Cloud save failed");
       }
 
+      const payload = await response.json();
+      stateVersion = payload.version || stateVersion;
       syncStatus = {
-        label: "Supabase saved",
+        label: "Vercel saved",
         detail: `Last saved ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`,
         mode: "online",
       };
@@ -241,7 +254,7 @@ function saveState() {
     .catch(() => {
       syncStatus = {
         label: "Save issue",
-        detail: "Changes are saved locally; check Supabase setup",
+        detail: "Changes are saved locally; reload before editing again",
         mode: "warning",
       };
     });
@@ -289,133 +302,46 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-async function getSupabaseClient() {
-  if (!supabaseClient) {
-    const { createClient } = await import(SUPABASE_CLIENT_URL);
-    supabaseClient = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false,
-      },
-    });
+async function loadBlobUploader() {
+  if (!blobUpload) {
+    const module = await import(BLOB_CLIENT_URL);
+    blobUpload = module.uploadPresigned;
   }
-  return supabaseClient;
+  return blobUpload;
 }
 
 async function uploadMediaFile(file, assetId) {
-  const supabase = await getSupabaseClient();
-  const path = `media/${Date.now()}-${assetId}-${sanitizeFilename(file.name) || "upload"}`;
-
   if (file.size > MAX_UPLOAD_BYTES) {
-    throw new Error(`"${file.name}" is larger than the 50 GB upload limit.`);
+    throw new Error(`"${file.name}" is larger than the 2 GB upload limit.`);
   }
 
-  if (file.size > LARGE_UPLOAD_THRESHOLD_BYTES || file.type.startsWith("video/")) {
-    await uploadLargeMediaFile(path, file);
-    const { data: publicUrl } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(path);
-    return {
-      path,
-      url: publicUrl.publicUrl,
-    };
-  }
-
-  const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).upload(path, file, {
-    cacheControl: "3600",
+  const pathname = `media/${Date.now()}-${assetId}-${sanitizeFilename(file.name) || "upload"}`;
+  const uploadToBlob = await loadBlobUploader();
+  const blob = await uploadToBlob(pathname, file, {
+    access: "public",
     contentType: file.type || "application/octet-stream",
-    upsert: false,
+    handleUploadUrl: UPLOAD_API,
+    multipart: file.size > MULTIPART_UPLOAD_THRESHOLD_BYTES,
   });
 
-  if (error) {
-    throw error;
-  }
-
-  const { data: publicUrl } = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(data.path);
   return {
-    path: data.path,
-    url: publicUrl.publicUrl,
+    path: blob.pathname,
+    pathname: blob.pathname,
+    url: blob.url,
   };
 }
 
-async function uploadLargeMediaFile(path, file) {
-  const endpoint = `https://${SUPABASE_PROJECT_REF}.storage.supabase.co/storage/v1/upload/resumable`;
-  const uploadUrl = await createResumableUpload(endpoint, path, file);
-  let offset = 0;
-
-  while (offset < file.size) {
-    const chunk = file.slice(offset, offset + LARGE_UPLOAD_THRESHOLD_BYTES);
-    const response = await fetch(uploadUrl, {
-      method: "PATCH",
-      headers: {
-        "Tus-Resumable": "1.0.0",
-        "Upload-Offset": String(offset),
-        "Content-Type": "application/offset+octet-stream",
-        apikey: SUPABASE_PUBLISHABLE_KEY,
-        authorization: `Bearer ${SUPABASE_STORAGE_AUTH_KEY}`,
-      },
-      body: chunk,
-    });
-
-    if (!response.ok) {
-      throw new Error(await formatUploadResponseError(response));
-    }
-
-    offset = Number(response.headers.get("Upload-Offset")) || offset + chunk.size;
-  }
-}
-
-async function createResumableUpload(endpoint, path, file) {
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Tus-Resumable": "1.0.0",
-      "Upload-Length": String(file.size),
-      "Upload-Metadata": uploadMetadataHeader({
-        bucketName: SUPABASE_BUCKET,
-        objectName: path,
-        contentType: file.type || "application/octet-stream",
-        cacheControl: "3600",
-      }),
-      apikey: SUPABASE_PUBLISHABLE_KEY,
-      authorization: `Bearer ${SUPABASE_STORAGE_AUTH_KEY}`,
-      "x-upsert": "false",
-    },
+async function deleteMediaFile(pathname, url) {
+  if (!pathname && !url) return;
+  const response = await fetch(MEDIA_API, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pathname, url }),
   });
 
   if (!response.ok) {
-    throw new Error(await formatUploadResponseError(response));
-  }
-
-  const location = response.headers.get("Location");
-  if (!location) {
-    throw new Error("Supabase did not return a resumable upload URL.");
-  }
-
-  return new URL(location, endpoint).toString();
-}
-
-function uploadMetadataHeader(metadata) {
-  return Object.entries(metadata)
-    .map(([key, value]) => `${key} ${btoa(String(value))}`)
-    .join(",");
-}
-
-async function formatUploadResponseError(response) {
-  const body = await response.text();
-  if (response.status === 413) {
-    return "Supabase rejected this video because it is larger than the project-wide Storage file size limit. Open Supabase Storage Settings and raise the Global file size limit to 50 GB or higher.";
-  }
-  if (body) return body;
-  if (response.statusText) return response.statusText;
-  return "Video upload failed. Try a smaller MP4 file or check Supabase storage.";
-}
-
-async function deleteMediaFile(path) {
-  if (!path) return;
-  const supabase = await getSupabaseClient();
-  const { error } = await supabase.storage.from(SUPABASE_BUCKET).remove([path]);
-  if (error) {
-    throw error;
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || "Unable to delete media from Vercel Blob.");
   }
 }
 
@@ -505,7 +431,8 @@ function brightsignUrl(screenIds = state.screens.slice(0, BRIGHTSIGN_OUTPUT_COUN
 
 function setView(view) {
   activeView = view;
-  saveState();
+  state.activeView = view;
+  localStorage.setItem(STATE_KEY, JSON.stringify(state));
   render();
 }
 
@@ -551,7 +478,8 @@ async function deleteBlob(id) {
 }
 
 function clearObjectUrls() {
-  currentObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+  mediaObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+  mediaObjectUrls.clear();
   currentObjectUrls = [];
   activePlayerObjectUrl = null;
 }
@@ -574,20 +502,71 @@ function clearEventCountdown() {
 }
 
 function replaceActivePlayerObjectUrl(url) {
-  if (activePlayerObjectUrl && activePlayerObjectUrl !== url) {
-    URL.revokeObjectURL(activePlayerObjectUrl);
-  }
   activePlayerObjectUrl = url && url.startsWith("blob:") ? url : null;
 }
 
-async function assetSrc(asset) {
+function remoteMediaCacheKey(asset) {
+  return `${REMOTE_MEDIA_CACHE_PREFIX}:${asset.id}:${asset.url}`;
+}
+
+async function cacheRemoteMedia(asset) {
+  if (!asset.url) return null;
+  const key = remoteMediaCacheKey(asset);
+  const cached = await getBlob(key);
+  if (cached) return cached;
+
+  if (!mediaCachePromises.has(key)) {
+    const download = fetch(asset.url, { cache: "force-cache" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Media download failed (${response.status}).`);
+        return response.blob();
+      })
+      .then(async (blob) => {
+        await putBlob(key, blob).catch(() => {});
+        return blob;
+      })
+      .finally(() => mediaCachePromises.delete(key));
+    mediaCachePromises.set(key, download);
+  }
+
+  return mediaCachePromises.get(key);
+}
+
+function objectUrlForBlob(key, blob) {
+  if (!mediaObjectUrls.has(key)) {
+    const url = URL.createObjectURL(blob);
+    mediaObjectUrls.set(key, url);
+    currentObjectUrls.push(url);
+  }
+  return mediaObjectUrls.get(key);
+}
+
+async function assetSrc(asset, { cacheRemote = true } = {}) {
   if (asset.type === "demo") return null;
-  if (asset.url) return asset.url;
+  if (asset.url && !cacheRemote) return asset.url;
+
+  if (asset.url) {
+    try {
+      const key = remoteMediaCacheKey(asset);
+      const blob = await cacheRemoteMedia(asset);
+      if (blob) return objectUrlForBlob(key, blob);
+    } catch {
+      return asset.url;
+    }
+  }
+
   const blob = await getBlob(asset.id);
   if (!blob) return null;
-  const url = URL.createObjectURL(blob);
-  currentObjectUrls.push(url);
-  return url;
+  return objectUrlForBlob(`local:${asset.id}`, blob);
+}
+
+async function warmPlayerMedia(screenId, snapshot = state) {
+  const queue = playerQueueForScreen(screenId, snapshot);
+  for (const asset of queue.assets) {
+    if (asset.url && asset.type !== "demo") {
+      await cacheRemoteMedia(asset).catch(() => null);
+    }
+  }
 }
 
 function shell(title, subtitle, body, actions = "") {
@@ -621,7 +600,7 @@ function shell(title, subtitle, body, actions = "") {
             .join("")}
         </nav>
         <div class="sidebar-note">
-          Player devices can open a screen URL in fullscreen kiosk mode. Media, screens, playlists, and schedules sync through Supabase when storage is connected.
+          Player devices can open a screen URL in fullscreen kiosk mode. Media, screens, playlists, and schedules sync through Vercel Blob.
         </div>
       </aside>
       <main class="main">
@@ -825,11 +804,10 @@ async function deployMediaUpdates(button = null) {
   state.deployToken = `${now}-${uid("deploy")}`;
   state.deployRequestedAt = now;
   publishContentUpdate({ allScreens: true });
-  state.screens.forEach((screen) => requestScreenRefresh(screen, now));
   await saveState();
 
   if (button) {
-    button.textContent = "Deploy sent";
+    button.textContent = "Updates queued";
     button.disabled = true;
     setTimeout(() => {
       button.textContent = "Deploy media updates";
@@ -858,7 +836,7 @@ async function renderMedia() {
           <div class="upload-zone">
             <div>
               <p class="row-title">Upload local files</p>
-              <p class="row-meta">${cloudStorageAvailable ? "Saved to the shared Supabase media library." : "Saved in this browser until Supabase is connected."}</p>
+              <p class="row-meta">${cloudStorageAvailable ? "Saved to the shared Vercel media library." : "Saved in this browser until Vercel reconnects."}</p>
               <input id="mediaUpload" type="file" accept="image/*,video/*" multiple />
             </div>
           </div>
@@ -936,7 +914,7 @@ async function hydrateAssetGrid() {
 
   const cards = await Promise.all(
     state.assets.map(async (asset) => {
-      const src = await assetSrc(asset);
+      const src = await assetSrc(asset, { cacheRemote: false });
       let thumb = `<div class="thumb demo">${asset.headline || "Slide"}</div>`;
       if (src && asset.type.startsWith("image/")) {
         thumb = `<div class="thumb"><img src="${src}" alt="${asset.name}" /></div>`;
@@ -992,6 +970,7 @@ async function handleUpload(event) {
         const media = await uploadMediaFile(file, id);
         asset.url = media.url;
         asset.path = media.path;
+        asset.pathname = media.pathname;
       } else {
         await putBlob(id, file);
       }
@@ -1024,7 +1003,8 @@ async function removeAsset(assetId) {
   publishContentUpdate({ allScreens: true });
 
   if (asset?.url && cloudStorageAvailable) {
-    await deleteMediaFile(asset.path || asset.pathname);
+    await deleteMediaFile(asset.pathname || asset.path, asset.url);
+    await deleteBlob(remoteMediaCacheKey(asset)).catch(() => {});
   } else {
     await deleteBlob(assetId);
   }
@@ -1647,6 +1627,7 @@ function updateEventCountdown(targetAt) {
 }
 
 async function renderBrightSignPlayer(screenIds = []) {
+  await requestPersistentStorage();
   const outputScreenIds = [...screenIds, ...state.screens.map((screen) => screen.id)]
     .filter((id, index, all) => id && all.indexOf(id) === index)
     .slice(0, BRIGHTSIGN_OUTPUT_COUNT);
@@ -1679,6 +1660,7 @@ async function renderBrightSignPlayer(screenIds = []) {
       stage: document.querySelector(`[data-brightsign-output="${index}"] .brightsign-stage`),
     };
     startBrightSignOutput(session);
+    warmPlayerMedia(screenId).catch(() => {});
     return session;
   });
 
@@ -1707,7 +1689,7 @@ async function startBrightSignOutput(session) {
     session.queueSignature = queue.signature;
   }
 
-  const shouldRotate = queue.assets.length > 1;
+  const shouldRotate = true;
   const asset = queue.assets[session.cursor % queue.assets.length];
   session.currentAssetId = asset.id;
   session.cursor += 1;
@@ -1802,11 +1784,7 @@ function scheduleBrightSignRefresh(screenIds) {
   brightsignRefreshTimer = setTimeout(async () => {
     const nextState = await loadState();
     const nextDeployToken = nextState.deployToken || "";
-    if (nextDeployToken && nextDeployToken !== brightsignDeployToken) {
-      reloadPlayerWindow("remote");
-      return;
-    }
-
+    brightsignDeployToken = nextDeployToken;
     state = nextState;
     const shouldSaveHeartbeat = Date.now() - brightsignLastHeartbeatAt >= PLAYER_HEARTBEAT_INTERVAL_MS;
     if (shouldSaveHeartbeat) {
@@ -1816,17 +1794,15 @@ function scheduleBrightSignRefresh(screenIds) {
     brightsignSessions.forEach((session) => {
       const nextSignature = playerPlaybackSignature(session.screenId, state);
       if (nextSignature !== session.queueSignature) {
-        session.cursor = 0;
-        session.currentAssetId = null;
-        startBrightSignOutput(session);
+        warmPlayerMedia(session.screenId).catch(() => {});
       }
     });
-    if (shouldSaveHeartbeat) saveState();
     scheduleBrightSignRefresh(screenIds);
   }, PLAYER_SYNC_INTERVAL_MS);
 }
 
 async function renderPlayer(screenId) {
+  await requestPersistentStorage();
   clearObjectUrls();
   const screen = state.screens.find((item) => item.id === screenId);
   if (!screen) {
@@ -1834,7 +1810,7 @@ async function renderPlayer(screenId) {
     return;
   }
 
-  markScreenOnline(screenId);
+  markScreenOnline(screenId, { persist: false });
 
   app.innerHTML = `
     <section class="player${screen.id === EVENT_COUNTDOWN.screenId ? " is-calendar-event-player" : ""}">
@@ -1890,6 +1866,7 @@ async function renderPlayer(screenId) {
   playerSession.playNext = playNext;
 
   playNext();
+  warmPlayerMedia(screenId).catch(() => {});
   scheduleDailyRolloverReload(screenId);
   scheduleBlankRecoveryCheck(screenId);
   schedulePlayerRefresh(screenId);
@@ -1897,7 +1874,6 @@ async function renderPlayer(screenId) {
 }
 
 function schedulePlayerRefresh(screenId) {
-  if (!cloudStorageAvailable) return;
   playerRefreshTimer = setTimeout(async () => {
     const nextState = await loadState();
     state = nextState;
@@ -1920,15 +1896,12 @@ function schedulePlayerRefresh(screenId) {
       playerSession?.queueSignature && nextQueueSignature !== playerSession.queueSignature;
     const shouldSaveHeartbeat =
       playerSession && Date.now() - playerSession.lastHeartbeatAt >= PLAYER_HEARTBEAT_INTERVAL_MS;
-    markScreenOnline(screenId, { persist: shouldSaveHeartbeat });
+    markScreenOnline(screenId, { persist: false });
     if (shouldSaveHeartbeat && playerSession) {
       playerSession.lastHeartbeatAt = Date.now();
     }
     if (shouldApplyContentUpdate && playerSession) {
-      clearTimeout(playerTimer);
-      playerSession.cursor = 0;
-      playerSession.currentAssetId = null;
-      playerSession.playNext?.();
+      warmPlayerMedia(screenId).catch(() => {});
     }
     schedulePlayerRefresh(screenId);
   }, PLAYER_SYNC_INTERVAL_MS);
@@ -1939,7 +1912,7 @@ function scheduleBlankRecoveryCheck(screenId) {
   playerBlankRecoveryTimer = setTimeout(() => {
     const stage = document.querySelector("#playerStage");
     const hasRenderedMedia = stage?.querySelector("img, video") || stage?.dataset.loading !== "true";
-    if (!hasRenderedMedia && window.location.hash === `#/player/${screenId}`) {
+    if (!hasRenderedMedia && !mediaCachePromises.size && window.location.hash === `#/player/${screenId}`) {
       reloadPlayerWindow("blank");
       return;
     }
@@ -2056,7 +2029,6 @@ async function showAsset(asset, done, shouldRotate = true, isCurrent = () => tru
       await video.play();
     } catch {
       cleanupVideoWatchdogs();
-      if (src.startsWith("blob:")) URL.revokeObjectURL(src);
       if (shouldRotate) playerTimer = setTimeout(done, 1000);
     }
   } else {
@@ -2072,7 +2044,6 @@ async function showAsset(asset, done, shouldRotate = true, isCurrent = () => tru
       stage.replaceChildren(image);
       if (shouldRotate) playerTimer = setTimeout(done, assetDuration(asset) * 1000);
     } catch {
-      if (src.startsWith("blob:")) URL.revokeObjectURL(src);
       if (shouldRotate) playerTimer = setTimeout(done, 1000);
     }
   }

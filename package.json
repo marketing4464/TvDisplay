@@ -5,7 +5,9 @@
   "description": "Local-first signage dashboard and fullscreen player for Just Add Power-style deployments.",
   "type": "module",
   "scripts": {
-    "dev": "python3 -m http.server 5173",
-    "start": "python3 -m http.server 5173"
+    "check": "node --check app.js && node --check api/state.js && node --check api/upload.js && node --check api/media.js && node --check scripts/migrate-local-media.mjs"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.8.0"
   }
 }
